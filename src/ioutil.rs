@@ -13,15 +13,15 @@ use tokio::io::{
     AsyncWriteExt,
 };
 
-pub async fn read_packet<R: DeserializeOwned>(mut read: impl Unpin + AsyncRead) -> Result<Option<R>, loga::Error> {
+pub async fn read_packet<R: DeserializeOwned>(mut read: impl Unpin + AsyncRead) -> Option<Result<R, loga::Error>> {
     let len = match read.read_u64().await {
         Ok(l) => l,
         Err(e) => match e.kind() {
             std::io::ErrorKind::BrokenPipe => {
-                return Ok(None);
+                return None;
             },
             _ => {
-                return Err(e.context("Error reading packet length"));
+                return Some(Err(e.context("Error reading packet length")));
             },
         },
     };
@@ -31,14 +31,14 @@ pub async fn read_packet<R: DeserializeOwned>(mut read: impl Unpin + AsyncRead) 
         Ok(_) => { },
         Err(e) => match e.kind() {
             std::io::ErrorKind::BrokenPipe => {
-                return Ok(None);
+                return None;
             },
             _ => {
-                return Err(e.context("Error reading packet body"));
+                return Some(Err(e.context("Error reading packet body")));
             },
         },
     };
-    return Ok(serde_json::from_slice(&buf).context("Error parsing packet")?);
+    return Some(serde_json::from_slice(&buf).context("Error parsing packet"));
 }
 
 pub async fn write_packet_bytes(mut write: impl Unpin + AsyncWrite, body: Vec<u8>) -> Result<(), loga::Error> {

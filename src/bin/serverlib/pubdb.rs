@@ -42,6 +42,11 @@ pub fn migrate(db: &mut rusqlite::Connection) -> Result<(), GoodError> {
                     let query = "create table \"configs\" ( \"rev_stamp\" text not null , \"data\" text not null )";
                     txn.execute(query, ()).to_good_error_query(query)?
                 };
+                {
+                    let query =
+                        "create table \"factor\" ( \"id\" text not null , \"enc_token\" blob not null , constraint \"factor_id\" primary key ( \"id\" ) )";
+                    txn.execute(query, ()).to_good_error_query(query)?
+                };
             }
             let query = "update __good_version set version = $1, lock = 0";
             txn.execute(query, rusqlite::params![0i64]).to_good_error_query(query)?;
@@ -83,7 +88,7 @@ pub fn migrate(db: &mut rusqlite::Connection) -> Result<(), GoodError> {
 pub fn config_push(
     db: &rusqlite::Connection,
     stamp: chrono::DateTime<chrono::Utc>,
-    data: &super::pubdbtypes::Config,
+    data: &passworth::config::Config,
 ) -> Result<(), GoodError> {
     let query = "insert into \"configs\" ( \"rev_stamp\" , \"data\" ) values ( $1 , $2 )";
     db
@@ -91,9 +96,9 @@ pub fn config_push(
             query,
             rusqlite::params![
                 stamp.to_rfc3339(),
-                <super::pubdbtypes::Config as good_ormning_runtime
+                <passworth::config::Config as good_ormning_runtime
                 ::sqlite
-                ::GoodOrmningCustomString<super::pubdbtypes::Config>>::to_sql(
+                ::GoodOrmningCustomString<passworth::config::Config>>::to_sql(
                     &data,
                 )
             ],
@@ -104,11 +109,12 @@ pub fn config_push(
 
 pub struct DbRes1 {
     pub rev_id: i64,
-    pub data: super::pubdbtypes::Config,
+    pub data: passworth::config::Config,
 }
 
 pub fn config_get_latest(db: &rusqlite::Connection) -> Result<Option<DbRes1>, GoodError> {
-    let query = "select max ( \"configs\" . \"rowid\" ) as \"rev_id\" , \"configs\" . \"data\" from \"configs\"";
+    let query =
+        "select max ( \"configs\" . \"rowid\" ) as \"rev_id\" , \"configs\" . \"data\" from \"configs\" group by null";
     let mut stmt = db.prepare(query).to_good_error_query(query)?;
     let mut rows = stmt.query(rusqlite::params![]).to_good_error_query(query)?;
     let r = rows.next().to_good_error(|| format!("Getting row in query [{}]", query))?;
@@ -121,9 +127,9 @@ pub fn config_get_latest(db: &rusqlite::Connection) -> Result<Option<DbRes1>, Go
             data: {
                 let x: String = r.get(1usize).to_good_error(|| format!("Getting result {}", 1usize))?;
                 let x =
-                    <super::pubdbtypes::Config as good_ormning_runtime
+                    <passworth::config::Config as good_ormning_runtime
                     ::sqlite
-                    ::GoodOrmningCustomString<super::pubdbtypes::Config>>::from_sql(
+                    ::GoodOrmningCustomString<passworth::config::Config>>::from_sql(
                         x,
                     ).to_good_error(|| format!("Parsing result {}", 1usize))?;
                 x
@@ -131,4 +137,49 @@ pub fn config_get_latest(db: &rusqlite::Connection) -> Result<Option<DbRes1>, Go
         }));
     }
     Ok(None)
+}
+
+pub fn factor_add(db: &rusqlite::Connection, id: &str, token: &[u8]) -> Result<(), GoodError> {
+    let query = "insert into \"factor\" ( \"id\" , \"enc_token\" ) values ( $1 , $2 )";
+    db.execute(query, rusqlite::params![id, token]).to_good_error_query(query)?;
+    Ok(())
+}
+
+pub fn factor_delete(db: &rusqlite::Connection, id: &str) -> Result<Option<i32>, GoodError> {
+    let query = "delete from \"factor\" where ( \"factor\" . \"id\" = $1 ) returning 0 as \"ok\"";
+    let mut stmt = db.prepare(query).to_good_error_query(query)?;
+    let mut rows = stmt.query(rusqlite::params![id]).to_good_error_query(query)?;
+    let r = rows.next().to_good_error(|| format!("Getting row in query [{}]", query))?;
+    if let Some(r) = r {
+        return Ok(Some({
+            let x: i32 = r.get(0usize).to_good_error(|| format!("Getting result {}", 0usize))?;
+            x
+        }));
+    }
+    Ok(None)
+}
+
+pub struct DbRes2 {
+    pub id: String,
+    pub enc_token: Vec<u8>,
+}
+
+pub fn factor_list(db: &rusqlite::Connection) -> Result<Vec<DbRes2>, GoodError> {
+    let mut out = vec![];
+    let query = "select \"factor\" . \"id\" , \"factor\" . \"enc_token\" from \"factor\"";
+    let mut stmt = db.prepare(query).to_good_error_query(query)?;
+    let mut rows = stmt.query(rusqlite::params![]).to_good_error_query(query)?;
+    while let Some(r) = rows.next().to_good_error(|| format!("Getting row in query [{}]", query))? {
+        out.push(DbRes2 {
+            id: {
+                let x: String = r.get(0usize).to_good_error(|| format!("Getting result {}", 0usize))?;
+                x
+            },
+            enc_token: {
+                let x: Vec<u8> = r.get(1usize).to_good_error(|| format!("Getting result {}", 1usize))?;
+                x
+            },
+        });
+    }
+    Ok(out)
 }

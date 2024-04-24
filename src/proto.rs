@@ -5,14 +5,25 @@ use serde::{
 
 pub const DEFAULT_SOCKET: &str = "/run/passworth.sock";
 pub const ENV_SOCKET: &str = "PASSWORTH_SOCK";
-pub const DEFAULT_BUFFER: usize = 
-    // B
-    1024 * 
-        // KiB
-        1024 * 
-        // MiB
-        4;
-pub const ENV_BUFFER: &str = "PASSWORTH_BUFFER";
+pub type PassPath = Vec<String>;
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum C2SGenerateVariant {
+    Bytes {
+        length: usize,
+    },
+    SafeAlphanumeric {
+        length: usize,
+    },
+    Alphanumeric {
+        length: usize,
+    },
+    AlphanumericSymbols {
+        length: usize,
+    },
+    Pgp,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -20,16 +31,34 @@ pub enum C2S {
     Unlock,
     Lock,
     Get {
-        paths: Vec<Vec<String>>,
-        at: Option<usize>,
+        paths: Vec<PassPath>,
+        at: Option<i64>,
     },
-    Set(Vec<(Vec<String>, serde_json::Value)>),
+    Set(Vec<(PassPath, serde_json::Value)>),
+    Move {
+        from: PassPath,
+        to: PassPath,
+        overwrite: bool,
+    },
+    Generate {
+        path: PassPath,
+        variant: C2SGenerateVariant,
+        overwrite: bool,
+    },
+    PgpSign {
+        key: PassPath,
+        data: Vec<u8>,
+    },
+    PgpDecrypt {
+        key: PassPath,
+        data: Vec<u8>,
+    },
     GetRevisions {
-        paths: Vec<Vec<String>>,
-        at: Option<usize>,
+        paths: Vec<PassPath>,
+        at: Option<i64>,
     },
     Revert {
-        paths: Vec<Vec<String>>,
-        at: usize,
+        paths: Vec<PassPath>,
+        at: i64,
     },
 }
