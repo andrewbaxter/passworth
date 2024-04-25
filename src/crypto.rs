@@ -1,10 +1,12 @@
 use std::{
     collections::HashSet,
     io::Cursor,
-    rc::Rc,
-    sync::atomic::{
-        AtomicBool,
-        Ordering,
+    sync::{
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+        Arc,
     },
     thread::sleep,
     time::Duration,
@@ -93,129 +95,148 @@ pub fn local_decrypt(key: &[u8], encrypted: &[u8]) -> Result<Option<Vec<u8>>, lo
     }
 }
 
+#[test]
+fn test_local_crypt() {
+    let key = &[0u8, 14, 222, 13, 197, 112, 123, 45];
+    let body = "hello".as_bytes();
+    let encrypted = local_encrypt(key, body);
+    let decrypted = local_decrypt(key, &encrypted).expect("Must not have parse errors").expect("Must decrypt");
+    assert_eq!(String::from_utf8(body.to_vec()).unwrap(), String::from_utf8(decrypted).unwrap());
+}
+
 pub struct CardStream {
-    alive: Rc<AtomicBool>,
+    alive: Arc<AtomicBool>,
     rx: mpsc::Receiver<openpgp_card_sequoia::Card<Open>>,
 }
 
 impl CardStream {
     pub fn new(log: &loga::StandardLog) -> Self {
-        let alive = Rc::new(AtomicBool::new(true));
+        let alive = Arc::new(AtomicBool::new(true));
         let (stream_tx, stream_rx) = channel(100);
         let log = log.clone();
-        gtk4::gio::spawn_blocking(move || {
-            let stream_tx = stream_tx;
-            let mut loop_state = None;
-            let mut watch: Vec<pcsc::ReaderState> = vec![];
-            loop {
-                loop_state = (|| {
-                    let pcsc_context;
-                    match loop_state.take() {
-                        Some(c) => {
-                            pcsc_context = c;
-                        },
-                        None => {
-                            pcsc_context = match pcsc::Context::establish(pcsc::Scope::User) {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    log.log_err(
-                                        loga::StandardFlag::Warning,
-                                        e.context("Error establishing pcsc context"),
-                                    );
-                                    sleep(Duration::from_secs(1));
-                                    return None;
-                                },
-                            };
-                            let mut reader_names = match pcsc_context.list_readers_owned() {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    log.log_err(
-                                        loga::StandardFlag::Warning,
-                                        e.context("Error listing initial pcsc readers"),
-                                    );
-                                    sleep(Duration::from_secs(1));
-                                    return None;
-                                },
-                            }.into_iter().collect::<HashSet<_>>();
-                            reader_names.insert(pcsc::PNP_NOTIFICATION().to_owned());
-                            let mut i = 0;
-                            loop {
-                                if i >= watch.len() {
-                                    break;
-                                }
-                                if reader_names.remove(&watch[i].name().to_owned()) {
-                                    i += 1;
-                                } else {
-                                    watch.remove(i);
-                                }
-                            }
-                            for new in &reader_names {
-                                watch.push(pcsc::ReaderState::new(new.clone(), pcsc::State::UNKNOWN));
-                            }
-                        },
+        std::thread::spawn({
+            let alive = alive.clone();
+            move || {
+                let stream_tx = stream_tx;
+                let mut loop_state = None;
+                let mut watch: Vec<pcsc::ReaderState> = vec![];
+                let alive = alive.clone();
+                loop {
+                    if !alive.load(Ordering::Relaxed) {
+                        break;
                     }
-                    match (|| {
-                        match pcsc_context.get_status_change(None, &mut watch) {
-                            Ok(_) => { },
-                            Err(pcsc::Error::ServiceStopped) | Err(pcsc::Error::NoService) => {
-                                // Windows will kill the SmartCard service when the last reader is disconnected
-                                return Ok(true);
+                    loop_state = (|| {
+                        let pcsc_context;
+                        match loop_state.take() {
+                            Some(c) => {
+                                pcsc_context = c;
                             },
-                            Err(e) => return Err(e),
-                        };
-                        for reader_state in &mut watch {
-                            bb!{
-                                'detect _;
-                                let old_state = reader_state.current_state();
-                                let new_state = reader_state.event_state();
-                                if !new_state.contains(pcsc::State::CHANGED) {
-                                    break 'detect;
-                                }
-                                if reader_state.name() == pcsc::PNP_NOTIFICATION() {
-                                    break 'detect;
-                                }
-                                if !old_state.contains(pcsc::State::PRESENT) &&
-                                    new_state.contains(pcsc::State::PRESENT) {
-                                    match (|| {
-                                        // TODO https://gitlab.com/openpgp-card/openpgp-card/-/issues/72
-                                        let Some(backend) = PcscBackend:: card_backends(None) ?.next() else {
-                                            return Ok(());
-                                        };
-                                        let backend = backend?;
-                                        let card = openpgp_card_sequoia::Card::<Open>::new(backend)?;
-                                        stream_tx.blocking_send(card)?;
-                                        return Ok(()) as Result<_, loga::Error>;
-                                    })() {
-                                        Ok(_) => (),
-                                        Err(e) => {
-                                            log.log_err(
-                                                loga::StandardFlag::Warning,
-                                                e.context("Error handling card"),
-                                            );
-                                        },
+                            None => {
+                                pcsc_context = match pcsc::Context::establish(pcsc::Scope::User) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        log.log_err(
+                                            loga::StandardFlag::Warning,
+                                            e.context("Error establishing pcsc context"),
+                                        );
+                                        sleep(Duration::from_secs(1));
+                                        return None;
+                                    },
+                                };
+                                let mut reader_names = match pcsc_context.list_readers_owned() {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        log.log_err(
+                                            loga::StandardFlag::Warning,
+                                            e.context("Error listing initial pcsc readers"),
+                                        );
+                                        sleep(Duration::from_secs(1));
+                                        return None;
+                                    },
+                                }.into_iter().collect::<HashSet<_>>();
+                                reader_names.insert(pcsc::PNP_NOTIFICATION().to_owned());
+                                let mut i = 0;
+                                loop {
+                                    if i >= watch.len() {
+                                        break;
+                                    }
+                                    if reader_names.remove(&watch[i].name().to_owned()) {
+                                        i += 1;
+                                    } else {
+                                        watch.remove(i);
                                     }
                                 }
-                            };
-
-                            reader_state.sync_current_state();
+                                for new in &reader_names {
+                                    watch.push(pcsc::ReaderState::new(new.clone(), pcsc::State::UNKNOWN));
+                                }
+                            },
                         }
-                        return Ok(false);
-                    })() {
-                        Ok(clear) => if clear {
-                            return None;
-                        } else {
-                            return Some(pcsc_context);
-                        },
-                        Err(e) => {
-                            log.log_err(
-                                loga::StandardFlag::Warning,
-                                e.context("Error waiting for next pcsc status change event"),
-                            );
-                            sleep(Duration::from_secs(1));
-                            return Some(pcsc_context);
-                        },
-                    }
-                })();
+                        match (|| {
+                            match pcsc_context.get_status_change(Some(Duration::from_secs(1)), &mut watch) {
+                                Ok(_) => { },
+                                Err(pcsc::Error::ServiceStopped) | Err(pcsc::Error::NoService) => {
+                                    // Windows will kill the SmartCard service when the last reader is disconnected
+                                    return Ok(true);
+                                },
+                                Err(pcsc::Error::Timeout) => {
+                                    return Ok(false);
+                                },
+                                Err(e) => return Err(e),
+                            };
+                            for reader_state in &mut watch {
+                                bb!{
+                                    'detect _;
+                                    let old_state = reader_state.current_state();
+                                    let new_state = reader_state.event_state();
+                                    if !new_state.contains(pcsc::State::CHANGED) {
+                                        break 'detect;
+                                    }
+                                    if reader_state.name() == pcsc::PNP_NOTIFICATION() {
+                                        break 'detect;
+                                    }
+                                    if !old_state.contains(pcsc::State::PRESENT) &&
+                                        new_state.contains(pcsc::State::PRESENT) {
+                                        match (|| {
+                                            // TODO https://gitlab.com/openpgp-card/openpgp-card/-/issues/72
+                                            let Some(backend) = PcscBackend:: card_backends(None) ?.next() else {
+                                                return Ok(());
+                                            };
+                                            let backend = backend?;
+                                            let card = openpgp_card_sequoia::Card::<Open>::new(backend)?;
+                                            stream_tx.blocking_send(card)?;
+                                            return Ok(()) as Result<_, loga::Error>;
+                                        })() {
+                                            Ok(_) => (),
+                                            Err(e) => {
+                                                log.log_err(
+                                                    loga::StandardFlag::Warning,
+                                                    e.context("Error handling card"),
+                                                );
+                                            },
+                                        }
+                                    }
+                                };
+
+                                reader_state.sync_current_state();
+                            }
+                            return Ok(false);
+                        })() {
+                            Ok(clear) => if clear {
+                                return None;
+                            } else {
+                                return Some(pcsc_context);
+                            },
+                            Err(e) => {
+                                log.log_err(
+                                    loga::StandardFlag::Warning,
+                                    e.context("Error waiting for next pcsc status change event"),
+                                );
+                                sleep(Duration::from_secs(1));
+                                return Some(pcsc_context);
+                            },
+                        }
+                    })();
+                }
             }
         });
         return Self {
@@ -285,7 +306,7 @@ pub async fn get_card_pubkey(
         let mut card =
             match card_tx
                 .to_user_card(pin.as_ref().map(|x| x.as_bytes()))
-                .to_ui_err_external("Error unlocking card with entered PIN") {
+                .to_ui_err_external("Error unlocking card with entered PIN.") {
                 Ok(c) => {
                     _ = resp_pin_tx.send(Ok(()));
                     c

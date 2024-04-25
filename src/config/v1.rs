@@ -9,17 +9,23 @@ use serde::{
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConfigCredSmartcardPin {
-    None,
-    Prompt,
-    Hardcode(String),
+pub struct ConfigCredSmartcard {
+    pub fingerprint: String,
+    /// If pinentry, this must be null and will use the entered pin.  If not pinentry,
+    /// either uses the config-specified pin or no pin.
+    #[serde(default)]
+    pub pin: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub struct ConfigCredSmartcard {
-    pub fingerprint: String,
-    pub pin: ConfigCredSmartcardPin,
+pub struct ConfigCredSmartcards {
+    /// If true, use the pin preconfigured for each smartcard instead of showing
+    /// pinentry.
+    #[serde(default)]
+    pub fixed_pin: bool,
+    /// List of cards that can be used.
+    pub smartcards: Vec<ConfigCredSmartcard>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -28,7 +34,7 @@ pub enum ConfigAuthFactorVariant {
     And(Vec<String>),
     Or(Vec<String>),
     Password,
-    Smartcard(Vec<ConfigCredSmartcard>),
+    Smartcards(ConfigCredSmartcards),
     RecoveryCode,
 }
 

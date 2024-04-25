@@ -23,3 +23,15 @@ macro_rules! bb{
         }
     };
 }
+
+/// Doing underscore assignment to ignore errors also ignores futures which is very
+/// bad.
+pub trait IgnoreErr<T> {
+    fn ignore(self);
+}
+
+impl<T, E> IgnoreErr<T> for Result<T, E> {
+    fn ignore(self) {
+        _ = self;
+    }
+}

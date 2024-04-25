@@ -262,6 +262,7 @@ async fn main2() -> Result<(), loga::Error> {
                             passworth::error::UiErr::External(e, i) => {
                                 i.unwrap_or(loga::err(&e))
                             },
+                            passworth::error::UiErr::InternalUnresolvable(e) => e,
                         };
                         log.log_err(StandardFlag::Warning, e.context("Error getting gpg key for card"));
                         continue;

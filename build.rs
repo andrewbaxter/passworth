@@ -26,6 +26,7 @@ use good_ormning::sqlite::{
         },
         field::{
             field_bytes,
+            field_i32,
             field_str,
             field_utctime_ms,
             Field,
@@ -62,9 +63,8 @@ fn main() {
 
         // Config
         {
-            let table = latest_version.table("zQLEK3CT0", "configs");
-            let rev_id = table.rowid_field(&mut latest_version, None);
-            let rev_date = table.field(&mut latest_version, "zM8SEBY6G", "rev_stamp", field_utctime_ms().build());
+            let table = latest_version.table("zQLEK3CT0", "config");
+            let unique = table.field(&mut latest_version, "zBI7DOV9J", "unique", field_i32().build());
             let data =
                 table.field(
                     &mut latest_version,
@@ -72,30 +72,31 @@ fn main() {
                     "data",
                     field_str().custom("passworth::config::Config").build(),
                 );
-            methods.push(
-                new_insert(
-                    &table,
-                    vec![set_field("stamp", &rev_date), set_field("data", &data)],
-                ).build_query("config_push", QueryResCount::None),
+            table.constraint(
+                &mut latest_version,
+                "zA3Q776DD",
+                "config_unique",
+                ConstraintType::PrimaryKey(PrimaryKeyDef { fields: vec![unique.clone()] }),
             );
             methods.push(
-                new_select(&table)
-                    .return_named("rev_id", expr_max(&rev_id))
-                    .return_field(&data)
-                    .group(vec![Expr::LitNull(SimpleType {
-                        // Hack to get max to return 0 rows for empty result set
-                        type_: SimpleSimpleType::Bool,
-                        custom: None,
-                    })])
-                    .build_query("config_get_latest", QueryResCount::MaybeOne),
+                new_insert(&table, vec![(unique.clone(), Expr::LitI32(0)), set_field("data", &data)])
+                    .on_conflict(
+                        good_ormning::sqlite::query::insert::InsertConflict::DoUpdate(vec![set_field("data", &data)]),
+                    )
+                    .build_query("config_set", QueryResCount::None),
             );
+            methods.push(new_select(&table).where_(Expr::BinOp {
+                left: Box::new(Expr::Field(unique.clone())),
+                op: BinOp::Equals,
+                right: Box::new(Expr::LitI32(0)),
+            }).return_field(&data).build_query("config_get", QueryResCount::MaybeOne));
         }
 
         // Factor associated data
         {
-            let table = latest_version.table("zDC6NTXMT", "factor");
+            let table = latest_version.table("zDC6NTXMT", "factor_state");
             let id = table.field(&mut latest_version, "zJ18G7WED", "id", field_str().build());
-            let token = table.field(&mut latest_version, "zIPCVSXVU", "enc_token", field_bytes().build());
+            let state = table.field(&mut latest_version, "zIPCVSXVU", "state", field_bytes().build());
             table.constraint(
                 &mut latest_version,
                 "z7NV6BK3R",
@@ -105,7 +106,7 @@ fn main() {
             methods.push(
                 new_insert(
                     &table,
-                    vec![set_field("id", &id), set_field("token", &token)],
+                    vec![set_field("id", &id), set_field("token", &state)],
                 ).build_query("factor_add", QueryResCount::None),
             );
             methods.push(
@@ -117,7 +118,7 @@ fn main() {
             methods.push(
                 new_select(&table)
                     .return_field(&id)
-                    .return_field(&token)
+                    .return_field(&state)
                     .build_query("factor_list", QueryResCount::Many),
             );
         }

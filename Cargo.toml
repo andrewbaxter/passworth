@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 pcsc = "2"
-aargvark = { version = "0.2", features = ["serde_json"], path = "../aargvark" }
+aargvark = { version = "0.2", features = ["serde_json"] }
 loga = "0.4"
 card-backend = "0.2"
 card-backend-pcsc = "0.5"
@@ -14,7 +14,7 @@ sequoia-openpgp = "1"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 chrono = "0.4"
-rusqlite = { version = "0.31", features = ["sqlcipher"] }
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
 nix = { version = "0.28", features = ["process", "fs"] }
 good-ormning-runtime = { version = "0.1", features = ["sqlite", "chrono"] }
 libc = "0.2"
@@ -37,6 +37,7 @@ rand = "0.8"
 zbase32 = "0.1"
 include-lines = "1.1.2"
 users = "0.11.0"
+libsqlite3-sys = { version = "0.28.0", features = ["bundled-sqlcipher"] }
 
 [build-dependencies]
 good-ormning = { version = "0.1", features = ["sqlite", "chrono"] }

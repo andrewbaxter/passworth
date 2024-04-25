@@ -3,7 +3,7 @@ use serde::{
     Serialize,
 };
 
-pub const DEFAULT_SOCKET: &str = "/run/passworth.sock";
+pub const DEFAULT_SOCKET: &str = "/tmp/passworth.sock";
 pub const ENV_SOCKET: &str = "PASSWORTH_SOCK";
 pub type PassPath = Vec<String>;
 

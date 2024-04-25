@@ -3,6 +3,7 @@ use loga::ErrContext;
 
 pub enum UiErr {
     Internal(loga::Error),
+    InternalUnresolvable(loga::Error),
     External(String, Option<loga::Error>),
 }
 
@@ -14,12 +15,13 @@ impl UiErr {
 
 impl From<loga::Error> for UiErr {
     fn from(value: loga::Error) -> Self {
-        return Self::Internal(value);
+        return Self::InternalUnresolvable(value);
     }
 }
 
 pub trait ToUiErr<T> {
     fn to_ui_err_external(self, context: &str) -> Result<T, UiErr>;
+    fn to_ui_err_internal_resolvable(self) -> Result<T, UiErr>;
 }
 
 impl<T, E: Into<loga::Error>> ToUiErr<T> for Result<T, E> {
@@ -28,6 +30,15 @@ impl<T, E: Into<loga::Error>> ToUiErr<T> for Result<T, E> {
             Ok(x) => return Ok(x),
             Err(e) => {
                 return Err(UiErr::External(context.to_string(), Some(e.context(context))));
+            },
+        }
+    }
+
+    fn to_ui_err_internal_resolvable(self) -> Result<T, UiErr> {
+        match self {
+            Ok(x) => return Ok(x),
+            Err(e) => {
+                return Err(UiErr::Internal(e.into()));
             },
         }
     }

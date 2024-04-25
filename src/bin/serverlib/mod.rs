@@ -5,4 +5,3 @@ pub mod fg;
 pub mod factor;
 pub mod permission;
 pub mod datapath;
-pub mod allocator;

@@ -39,12 +39,13 @@ pub fn migrate(db: &mut rusqlite::Connection) -> Result<(), GoodError> {
             }
             if version < 0i64 {
                 {
-                    let query = "create table \"configs\" ( \"rev_stamp\" text not null , \"data\" text not null )";
+                    let query =
+                        "create table \"config\" ( \"data\" text not null , \"unique\" integer not null , constraint \"config_unique\" primary key ( \"unique\" ) )";
                     txn.execute(query, ()).to_good_error_query(query)?
                 };
                 {
                     let query =
-                        "create table \"factor\" ( \"id\" text not null , \"enc_token\" blob not null , constraint \"factor_id\" primary key ( \"id\" ) )";
+                        "create table \"factor_state\" ( \"id\" text not null , \"state\" blob not null , constraint \"factor_id\" primary key ( \"id\" ) )";
                     txn.execute(query, ()).to_good_error_query(query)?
                 };
             }
@@ -85,17 +86,13 @@ pub fn migrate(db: &mut rusqlite::Connection) -> Result<(), GoodError> {
     }
 }
 
-pub fn config_push(
-    db: &rusqlite::Connection,
-    stamp: chrono::DateTime<chrono::Utc>,
-    data: &passworth::config::Config,
-) -> Result<(), GoodError> {
-    let query = "insert into \"configs\" ( \"rev_stamp\" , \"data\" ) values ( $1 , $2 )";
+pub fn config_set(db: &rusqlite::Connection, data: &passworth::config::Config) -> Result<(), GoodError> {
+    let query =
+        "insert into \"config\" ( \"unique\" , \"data\" ) values ( 0 , $1 ) on conflict do update set \"data\" = $1";
     db
         .execute(
             query,
             rusqlite::params![
-                stamp.to_rfc3339(),
                 <passworth::config::Config as good_ormning_runtime
                 ::sqlite
                 ::GoodOrmningCustomString<passworth::config::Config>>::to_sql(
@@ -107,46 +104,34 @@ pub fn config_push(
     Ok(())
 }
 
-pub struct DbRes1 {
-    pub rev_id: i64,
-    pub data: passworth::config::Config,
-}
-
-pub fn config_get_latest(db: &rusqlite::Connection) -> Result<Option<DbRes1>, GoodError> {
-    let query =
-        "select max ( \"configs\" . \"rowid\" ) as \"rev_id\" , \"configs\" . \"data\" from \"configs\" group by null";
+pub fn config_get(db: &rusqlite::Connection) -> Result<Option<passworth::config::Config>, GoodError> {
+    let query = "select \"config\" . \"data\" from \"config\" where ( \"config\" . \"unique\" = 0 )";
     let mut stmt = db.prepare(query).to_good_error_query(query)?;
     let mut rows = stmt.query(rusqlite::params![]).to_good_error_query(query)?;
     let r = rows.next().to_good_error(|| format!("Getting row in query [{}]", query))?;
     if let Some(r) = r {
-        return Ok(Some(DbRes1 {
-            rev_id: {
-                let x: i64 = r.get(0usize).to_good_error(|| format!("Getting result {}", 0usize))?;
-                x
-            },
-            data: {
-                let x: String = r.get(1usize).to_good_error(|| format!("Getting result {}", 1usize))?;
-                let x =
-                    <passworth::config::Config as good_ormning_runtime
-                    ::sqlite
-                    ::GoodOrmningCustomString<passworth::config::Config>>::from_sql(
-                        x,
-                    ).to_good_error(|| format!("Parsing result {}", 1usize))?;
-                x
-            },
+        return Ok(Some({
+            let x: String = r.get(0usize).to_good_error(|| format!("Getting result {}", 0usize))?;
+            let x =
+                <passworth::config::Config as good_ormning_runtime
+                ::sqlite
+                ::GoodOrmningCustomString<passworth::config::Config>>::from_sql(
+                    x,
+                ).to_good_error(|| format!("Parsing result {}", 0usize))?;
+            x
         }));
     }
     Ok(None)
 }
 
 pub fn factor_add(db: &rusqlite::Connection, id: &str, token: &[u8]) -> Result<(), GoodError> {
-    let query = "insert into \"factor\" ( \"id\" , \"enc_token\" ) values ( $1 , $2 )";
+    let query = "insert into \"factor_state\" ( \"id\" , \"state\" ) values ( $1 , $2 )";
     db.execute(query, rusqlite::params![id, token]).to_good_error_query(query)?;
     Ok(())
 }
 
 pub fn factor_delete(db: &rusqlite::Connection, id: &str) -> Result<Option<i32>, GoodError> {
-    let query = "delete from \"factor\" where ( \"factor\" . \"id\" = $1 ) returning 0 as \"ok\"";
+    let query = "delete from \"factor_state\" where ( \"factor_state\" . \"id\" = $1 ) returning 0 as \"ok\"";
     let mut stmt = db.prepare(query).to_good_error_query(query)?;
     let mut rows = stmt.query(rusqlite::params![id]).to_good_error_query(query)?;
     let r = rows.next().to_good_error(|| format!("Getting row in query [{}]", query))?;
@@ -159,23 +144,23 @@ pub fn factor_delete(db: &rusqlite::Connection, id: &str) -> Result<Option<i32>,
     Ok(None)
 }
 
-pub struct DbRes2 {
+pub struct DbRes1 {
     pub id: String,
-    pub enc_token: Vec<u8>,
+    pub state: Vec<u8>,
 }
 
-pub fn factor_list(db: &rusqlite::Connection) -> Result<Vec<DbRes2>, GoodError> {
+pub fn factor_list(db: &rusqlite::Connection) -> Result<Vec<DbRes1>, GoodError> {
     let mut out = vec![];
-    let query = "select \"factor\" . \"id\" , \"factor\" . \"enc_token\" from \"factor\"";
+    let query = "select \"factor_state\" . \"id\" , \"factor_state\" . \"state\" from \"factor_state\"";
     let mut stmt = db.prepare(query).to_good_error_query(query)?;
     let mut rows = stmt.query(rusqlite::params![]).to_good_error_query(query)?;
     while let Some(r) = rows.next().to_good_error(|| format!("Getting row in query [{}]", query))? {
-        out.push(DbRes2 {
+        out.push(DbRes1 {
             id: {
                 let x: String = r.get(0usize).to_good_error(|| format!("Getting result {}", 0usize))?;
                 x
             },
-            enc_token: {
+            state: {
                 let x: Vec<u8> = r.get(1usize).to_good_error(|| format!("Getting result {}", 1usize))?;
                 x
             },

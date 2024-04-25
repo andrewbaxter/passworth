@@ -16,7 +16,7 @@ use loga::{
 };
 use passworth::{
     bb,
-    config::{
+    config::latest::{
         ConfigPermissionRule,
         ConfigPrompt,
         MatchBinary,
@@ -444,8 +444,18 @@ pub async fn permit(
     if let Some(prompt) = total_prompt {
         let (resp_tx, resp_rx) = oneshot::channel();
         fg_tx.try_send(B2F::Prompt(B2FPrompt { prompt_rules: prompt.rules.clone() }, resp_tx))?;
-        if !resp_rx.await.unwrap() {
-            return Err(loga::err("User rejected access request"));
+        match resp_rx.await.unwrap() {
+            Ok(Some(b)) => {
+                if !b {
+                    return Err(loga::err("User rejected access request"));
+                }
+            },
+            Ok(None) => {
+                return Err(loga::err("User rejected access request"));
+            },
+            Err(e) => {
+                return Err(e);
+            },
         }
     }
     return Ok(Perms {

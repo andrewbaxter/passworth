@@ -1,4 +1,7 @@
+#![feature(int_roundings)]
+
 use std::{
+    cell::RefCell,
     collections::{
         HashMap,
         HashSet,
@@ -6,7 +9,6 @@ use std::{
     env,
     io::Cursor,
     path::{
-        Path,
         PathBuf,
     },
     str::FromStr,
@@ -22,7 +24,12 @@ use aargvark::{
     AargvarkJson,
 };
 use chrono::Utc;
+use gtk4::{
+    glib::LogLevels,
+    prelude::ApplicationExtManual,
+};
 use libc::{
+    c_void,
     mlockall,
     MCL_CURRENT,
     MCL_FUTURE,
@@ -31,6 +38,7 @@ use libc::{
 use loga::{
     ea,
     fatal,
+    DebugDisplay,
     ErrContext,
     ResultContext,
     StandardFlag,
@@ -38,7 +46,8 @@ use loga::{
 };
 use passworth::{
     bb,
-    config::Config,
+    config,
+    generate,
     ioutil::{
         read_packet,
         write_packet_bytes,
@@ -48,9 +57,8 @@ use passworth::{
         DEFAULT_SOCKET,
         ENV_SOCKET,
     },
-    generate,
+    IgnoreErr,
 };
-use rusqlite::Connection;
 use sequoia_openpgp::{
     cert::CertBuilder,
     packet::{
@@ -92,7 +100,6 @@ use tokio::{
         create_dir_all,
         remove_file,
     },
-    runtime::self,
     select,
     sync::{
         broadcast,
@@ -113,6 +120,7 @@ use crate::serverlib::{
         specific_from_db_path,
         specific_to_db_path,
     },
+    dbutil::open_privdb,
     factor::build_factor_tree,
     fg::{
         FgState,
@@ -129,7 +137,8 @@ pub mod serverlib;
 
 #[derive(Aargvark)]
 struct Args {
-    config: AargvarkJson<Config>,
+    config: AargvarkJson<config::latest::Config>,
+    debug: Option<()>,
 }
 
 fn resp_error(message: &str) -> Result<Vec<u8>, loga::Error> {
@@ -175,21 +184,35 @@ fn bury(root: &mut Option<serde_json::Value>, path: &[String], value: serde_json
     *at = value;
 }
 
-fn open_privdb(path: &Path, token: &str) -> Result<Connection, loga::Error> {
-    let privdbc = rusqlite::Connection::open(&path).unwrap();
-    privdbc.execute("PRAGMA key = ':key'", &[(":key", &token)])?;
-    return Ok(privdbc);
-}
-
 async fn main2() -> Result<(), loga::Error> {
     if unsafe {
         mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)
     } != 0 {
         return Err(loga::err("mlockall failed, couldn't prevent memory from paging out"));
     }
-    let log = StandardLog::new().with_flags(&[StandardFlag::Error, StandardFlag::Warning, StandardFlag::Info]);
     let tm = TaskManager::new();
     let args = vark::<Args>();
+    let log = {
+        let mut levels = vec![StandardFlag::Error, StandardFlag::Warning, StandardFlag::Info];
+        if args.debug.is_some() {
+            levels.push(StandardFlag::Debug);
+        }
+        StandardLog::new().with_flags(&levels)
+    };
+    for domain in [None, Some("Gtk"), Some("GLib"), Some("Gdk")] {
+        gtk4::glib::log_set_handler(domain, LogLevels::all(), true, true, {
+            let log = log.clone();
+            move |domain, level, text| {
+                log.log_with(
+                    // Gdk et all log stuff as CRITICAL that's clearly not critical... ignore reported
+                    // levels
+                    StandardFlag::Debug,
+                    text,
+                    ea!(source = "gtk", level = level.dbg_str(), domain = domain.dbg_str()),
+                );
+            }
+        });
+    }
     let config = args.config.value;
 
     // Data prep + preprocessing
@@ -208,39 +231,75 @@ async fn main2() -> Result<(), loga::Error> {
     // Start fg thread
     let (fg_tx, mut fg_rx) = mpsc::channel(100);
     tm.critical_task("Foreground interactions", {
-        let mut fg_state = FgState {
+        let fg_state = Arc::new(FgState {
             log: log.fork(ea!(sys = "human")),
-            last_prompts: HashMap::new(),
+            last_prompts: Mutex::new(HashMap::new()),
+        });
+        let work = {
+            let tm = tm.clone();
+            async move {
+                loop {
+                    let Some(req) = fg_rx.recv().await else {
+                        break;
+                    };
+                    let req = RefCell::new(Some(req));
+                    let tm = RefCell::new(Some(tm.clone()));
+
+                    // Start thread to run gtk, gtk event loop
+                    let fg_state = fg_state.clone();
+                    spawn_blocking(move || {
+                        let app =
+                            gtk4::Application::builder()
+                                .application_id("x.passworth")
+                                .flags(gtk4::gio::ApplicationFlags::FLAGS_NONE)
+                                .build();
+                        gtk4::gio::prelude::ApplicationExt::connect_activate(&app, move |app| {
+                            let app = app.clone();
+
+                            // Hack to work around `connect_activate` being `Fn` instead of `FnOnce`
+                            let fg_state = fg_state.clone();
+                            let tm = tm.borrow_mut().take().unwrap();
+                            let req = req.borrow_mut().take().unwrap();
+
+                            // Start current-thread async task in gtk thread to read queue
+                            gtk4::glib::spawn_future_local({
+                                let hold = app.hold();
+                                let work = async move {
+                                    let _hold = hold;
+                                    match req {
+                                        B2F::Unlock(req, resp) => {
+                                            resp.send(fg::do_unlock(fg_state, &app, Arc::new(req)).await).ignore();
+                                        },
+                                        B2F::Initialize(req, resp) => {
+                                            resp
+                                                .send(fg::do_initialize(fg_state, &app, Arc::new(req)).await)
+                                                .ignore();
+                                        },
+                                        B2F::Prompt(req, resp) => {
+                                            resp.send(fg::do_prompt(fg_state, &app, Arc::new(req)).await).ignore();
+                                        },
+                                    }
+                                };
+                                async move {
+                                    select!{
+                                        _ = work =>(),
+                                        _ = tm.until_terminate() =>()
+                                    };
+                                }
+                            });
+                        });
+                        gtk4::prelude::ApplicationExtManual::run_with_args(&app, &[] as &[String]);
+                    }).await.unwrap();
+                }
+            }
         };
         let tm = tm.clone();
         async move {
-            spawn_blocking(move || loop {
-                let Some(req) = runtime:: Builder:: new_current_thread().build().unwrap().block_on(async {
-                    select!{
-                        r = fg_rx.recv() => r,
-                        _ = tm.until_terminate() => None
-                    }
-                }) else {
-                    break;
-                };
-                match req {
-                    B2F::Unlock(req, resp) => {
-                        if let Some(r) = fg::do_unlock(&fg_state.log, Arc::new(req)) {
-                            _ = resp.send(r);
-                        }
-                    },
-                    B2F::Initialize(req, resp) => {
-                        if let Some(r) = fg::do_initialize(&fg_state.log, Arc::new(req)) {
-                            _ = resp.send(r);
-                        }
-                    },
-                    B2F::Prompt(req, resp) => {
-                        if let Some(r) = fg::do_prompt(&mut fg_state, Arc::new(req)) {
-                            _ = resp.send(r);
-                        }
-                    },
-                }
-            }).await.unwrap();
+            select!{
+                _ = work =>(),
+                _ = tm.until_terminate() =>()
+            };
+
             return Ok(());
         }
     });
@@ -296,11 +355,14 @@ async fn main2() -> Result<(), loga::Error> {
         'priv_init_done _;
         let mut prev_state = HashMap::new();
         for t in pubdb::factor_list(&mut pubdbc)? {
-            prev_state.insert(t.id, t.enc_token);
+            prev_state.insert(t.id, t.state);
         }
-        if let Some(previous_config) = pubdb::config_get_latest(&mut pubdbc)? {
+        if let Some(previous_config) = pubdb::config_get(&mut pubdbc)? {
+            let previous_config = match previous_config {
+                config::Config::V1(config) => config,
+            };
+
             // Previous config existed
-            let previous_config = previous_config.data;
             let prev_root_factor =
                 build_factor_tree(
                     &HashSet::new(),
@@ -380,16 +442,16 @@ async fn main2() -> Result<(), loga::Error> {
                                 factor_token_changed.insert(new.id.clone());
                             }
                         },
-                        FactorTreeVariant::Smartcard(children) => {
+                        FactorTreeVariant::Smartcards(config) => {
                             let mut lookup_old_children = HashSet::new();
-                            if let Some(FactorTreeVariant::Smartcard(old_children)) = old_variant {
-                                for child in old_children {
+                            if let Some(FactorTreeVariant::Smartcards(old_config)) = old_variant {
+                                for child in &old_config.smartcards {
                                     lookup_old_children.insert(child.fingerprint.clone());
                                 }
                             } else {
                                 factor_token_changed.insert(new.id.clone());
                             }
-                            for child in children {
+                            for child in &config.smartcards {
                                 if !lookup_old_children.contains(&child.fingerprint) {
                                     factor_state_changed.insert(new.id.clone());
                                     break;
@@ -407,7 +469,6 @@ async fn main2() -> Result<(), loga::Error> {
                 }
                 factor_active = seen;
             }
-            eprintln!("changed token: {:?}, state: {:?}", factor_token_changed, factor_state_changed);
 
             // Skip if nothing changed
             let root_token_changed = factor_token_changed.contains(&root_factor.id);
@@ -415,23 +476,27 @@ async fn main2() -> Result<(), loga::Error> {
                 break 'priv_init_done;
             }
             let mut remove_state = prev_state.keys().cloned().collect::<Vec<_>>();
-            remove_state.retain(|x| factor_active.contains(x));
+            remove_state.retain(|x| !factor_active.contains(x));
 
             // Otherwise first unlock
             let unlock_result;
             {
                 let (resp_tx, resp_rx) = oneshot::channel();
-                _ = state.fg_tx.send(B2F::Unlock(B2FUnlock {
+                state.fg_tx.send(B2F::Unlock(B2FUnlock {
                     privdb_path: state.privdb_path.clone(),
                     root_factor: prev_root_factor.clone(),
                     state: prev_state.clone(),
-                }, resp_tx)).await;
-                unlock_result = resp_rx.await.context("Config update unlock aborted by user")?;
+                }, resp_tx)).await.ignore();
+                unlock_result =
+                    resp_rx
+                        .await?
+                        .context("Error doing fg unlock")?
+                        .context("Config update unlock aborted by user")?;
             }
 
             // Continue with init
             let (resp_tx, resp_rx) = oneshot::channel();
-            _ = state.fg_tx.send(B2F::Initialize(B2FInitialize {
+            state.fg_tx.send(B2F::Initialize(B2FInitialize {
                 privdbc: None,
                 root_factor: root_factor.clone(),
                 tokens_changed: factor_token_changed,
@@ -439,12 +504,17 @@ async fn main2() -> Result<(), loga::Error> {
                 state_changed: factor_state_changed,
                 prev_state: prev_state,
                 prev_root_factor: Some(prev_root_factor),
-            }, resp_tx)).await;
-            let init_result = resp_rx.await.context("Credential initialization aborted by user")?;
+            }, resp_tx)).await.ignore();
+            let init_result =
+                resp_rx
+                    .await?
+                    .context("Error doing fg initialize")?
+                    .context("Credential initialization aborted by user")?;
 
             // Store the new config and tokens
             tx(pubdbc, move |txn| {
                 for k in &remove_state {
+                    eprintln!("CHANGE remove factor {}", k);
                     if !pubdb::factor_delete(txn, k)
                         .context_with("Error removing obsolete factor data", ea!(factor = k))?
                         .is_some() {
@@ -452,11 +522,25 @@ async fn main2() -> Result<(), loga::Error> {
                     }
                 }
                 for (k, v) in &init_result.store_state {
+                    eprintln!("CHANGE add factor {}", k);
                     pubdb::factor_add(txn, &k, &v).context_with("Error storing new factor data", ea!(factor = k))?;
                 }
-                pubdb::config_push(txn, Utc::now(), &config)?;
+                pubdb::config_set(txn, &config::Config::V1(config))?;
                 if root_token_changed {
-                    unlock_result.privdbc.execute("PRAGMA rekey = ':key'", &[(":key", &init_result.root_token)])?;
+                    let Some(root_token) = init_result.root_token else {
+                        panic!();
+                    };
+                    let root_token = root_token.as_bytes();
+                    let res = unsafe {
+                        libsqlite3_sys::sqlite3_rekey(
+                            unlock_result.privdbc.handle(),
+                            root_token.as_ptr() as *const c_void,
+                            root_token.len() as i32,
+                        )
+                    };
+                    if res != 0 {
+                        return Err(loga::err_with("Sqlcipher rekey operation exited with code", ea!(code = res)));
+                    }
                 }
                 return Ok(());
             }).await.context("Error committing new unlock credentials")?;
@@ -464,7 +548,7 @@ async fn main2() -> Result<(), loga::Error> {
         else {
             let all_factors = config.auth_factors.iter().map(|x| x.id.clone()).collect::<HashSet<_>>();
             let (resp_tx, resp_rx) = oneshot::channel();
-            _ = state.fg_tx.send(B2F::Initialize(B2FInitialize {
+            state.fg_tx.send(B2F::Initialize(B2FInitialize {
                 privdbc: None,
                 root_factor: root_factor.clone(),
                 tokens_changed: all_factors.clone(),
@@ -472,15 +556,20 @@ async fn main2() -> Result<(), loga::Error> {
                 state_changed: all_factors.clone(),
                 prev_state: HashMap::new(),
                 prev_root_factor: None,
-            }, resp_tx)).await;
-            let init_result = resp_rx.await.context("Credential initialization aborted by user")?;
+            }, resp_tx)).await.ignore();
+            let init_result =
+                resp_rx
+                    .await?
+                    .context("Error doing fg initialize")?
+                    .context("Credential initialization aborted by user")?;
 
             // Store the new config and tokens
             tx(pubdbc, move |txn| {
                 for (k, v) in &init_result.store_state {
+                    eprintln!("NEW add factor {}", k);
                     pubdb::factor_add(txn, &k, &v).context_with("Error storing new factor data", ea!(factor = k))?;
                 }
-                pubdb::config_push(txn, Utc::now(), &config)?;
+                pubdb::config_set(txn, &config::Config::V1(config))?;
                 return Ok(());
             }).await.context("Error committing new unlock credentials")?;
         }
@@ -550,23 +639,22 @@ async fn main2() -> Result<(), loga::Error> {
                         let mut pubdbc = rusqlite::Connection::open(&state.pubdb_path).unwrap();
                         let mut factor_state = HashMap::new();
                         for t in pubdb::factor_list(&mut pubdbc)? {
-                            factor_state.insert(t.id, t.enc_token);
+                            factor_state.insert(t.id, t.state);
                         }
                         let (fg_tx, fg_rx) = oneshot::channel();
                         state.fg_tx.send(B2F::Unlock(B2FUnlock {
                             privdb_path: state.privdb_path.clone(),
                             root_factor: state.root_factor.clone(),
                             state: factor_state,
-                        }, fg_tx)).await.unwrap();
-                        let Ok(res) = fg_rx.await else {
-                            return Err(loga::err("User closed unlock window"));
-                        };
+                        }, fg_tx)).await.ignore();
+                        let res =
+                            fg_rx.await?.context("Error during fg unlock")?.context("User closed unlock window")?;
 
                         // Update shared token + return
                         let mut token = state.token.lock().unwrap();
                         token.wait_sub = None;
                         token.token = Some(res.root_token.clone());
-                        _ = token_tx.send(res.root_token.clone());
+                        token_tx.send(res.root_token.clone()).ignore();
                         res.privdbc
                     },
                 };

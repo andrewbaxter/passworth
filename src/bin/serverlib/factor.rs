@@ -9,10 +9,10 @@ use loga::{
     ea,
     StandardLog,
 };
-use passworth::config::{
+use passworth::config::latest::{
     ConfigAuthFactor,
     ConfigAuthFactorVariant,
-    ConfigCredSmartcard,
+    ConfigCredSmartcards,
 };
 
 #[derive(PartialEq)]
@@ -27,7 +27,7 @@ pub enum FactorTreeVariant {
     And(Vec<Arc<FactorTree>>),
     Or(Vec<Arc<FactorTree>>),
     Password,
-    Smartcard(Vec<ConfigCredSmartcard>),
+    Smartcards(ConfigCredSmartcards),
     RecoveryPhrase,
 }
 
@@ -89,8 +89,8 @@ pub fn build_factor_tree(
         ConfigAuthFactorVariant::Password => {
             variant = FactorTreeVariant::Password;
         },
-        ConfigAuthFactorVariant::Smartcard(s) => {
-            variant = FactorTreeVariant::Smartcard(s.clone());
+        ConfigAuthFactorVariant::Smartcards(s) => {
+            variant = FactorTreeVariant::Smartcards(s.clone());
         },
         ConfigAuthFactorVariant::RecoveryCode => {
             variant = FactorTreeVariant::RecoveryPhrase;
