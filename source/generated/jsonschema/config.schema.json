@@ -5,27 +5,21 @@
     {
       "type": "object",
       "required": [
-        "v1"
-      ],
-      "properties": {
-        "v1": {
-          "$ref": "#/definitions/Config"
-        }
-      },
-      "additionalProperties": false
-    }
-  ],
-  "definitions": {
-    "Config": {
-      "type": "object",
-      "required": [
         "access",
         "auth_factors",
         "data_path",
         "lock_timeout",
-        "root_factor"
+        "root_factor",
+        "type"
       ],
       "properties": {
+        "$schema": {
+          "writeOnly": true,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "access": {
           "description": "Permissions for processes to access subtrees.",
           "type": "array",
@@ -53,10 +47,18 @@
         "root_factor": {
           "description": "Which factor forms the root of the tree (provides the database key).",
           "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "v1"
+          ]
         }
       },
       "additionalProperties": false
-    },
+    }
+  ],
+  "definitions": {
     "ConfigAuthFactor": {
       "type": "object",
       "required": [

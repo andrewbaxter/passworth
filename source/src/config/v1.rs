@@ -127,6 +127,8 @@ pub struct ConfigPermissionRule {
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Config {
+    #[serde(rename = "$schema", skip_serializing)]
+    pub _schema: Option<String>,
     /// A directory where this will store sqlite databases.
     pub data_path: PathBuf,
     /// Lock if no successful activity for this many seconds.
