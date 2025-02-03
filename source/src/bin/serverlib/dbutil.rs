@@ -1,15 +1,16 @@
-use std::path::Path;
-use libc::c_void;
-use loga::{
+use {std::path::Path,
+libc::c_void,
+loga::{
     ea,
     ErrContext,
     ResultContext,
-};
-use rusqlite::{
+},
+rusqlite::{
     Connection,
     Transaction,
+},
+tokio::task::spawn_blocking,
 };
-use tokio::task::spawn_blocking;
 
 pub async fn tx<
     T: 'static + Send,

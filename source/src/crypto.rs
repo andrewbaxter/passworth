@@ -1,61 +1,63 @@
-use std::{
-    collections::HashSet,
-    io::Cursor,
-    sync::{
-        atomic::{
-            AtomicBool,
-            Ordering,
+use {
+    super::error::{
+        ToUiErr,
+        UiErr,
+    },
+    card_backend_pcsc::PcscBackend,
+    chacha20poly1305::{
+        aead::Aead,
+        AeadCore,
+        ChaCha20Poly1305,
+        KeyInit,
+    },
+    flowcontrol::shed,
+    loga::{
+        ErrContext,
+        ResultContext,
+    },
+    openpgp_card_sequoia::{
+        state::Open,
+        PublicKey,
+    },
+    sequoia_openpgp::{
+        parse::{
+            stream::DecryptorBuilder,
+            Parse,
         },
-        Arc,
+        policy::StandardPolicy,
     },
-    thread::sleep,
-    time::Duration,
-};
-use card_backend_pcsc::PcscBackend;
-use loga::{
-    ErrContext,
-};
-use openpgp_card_sequoia::{
-    state::Open,
-    PublicKey,
-};
-use sequoia_openpgp::{
-    parse::{
-        stream::DecryptorBuilder,
-        Parse,
+    serde::{
+        Deserialize,
+        Serialize,
     },
-    policy::StandardPolicy,
-};
-use tokio::{
-    runtime,
-    select,
-    sync::{
-        mpsc::{
-            self,
-            channel,
+    sha2::{
+        Digest,
+        Sha256,
+    },
+    std::{
+        collections::HashSet,
+        io::Cursor,
+        sync::{
+            atomic::{
+                AtomicBool,
+                Ordering,
+            },
+            Arc,
         },
-        oneshot,
+        thread::sleep,
+        time::Duration,
     },
-};
-use chacha20poly1305::{
-    aead::Aead,
-    AeadCore,
-    ChaCha20Poly1305,
-    KeyInit,
-};
-use loga::ResultContext;
-use serde::{
-    Deserialize,
-    Serialize,
-};
-use sha2::{
-    Digest,
-    Sha256,
-};
-use crate::bb;
-use super::error::{
-    ToUiErr,
-    UiErr,
+    tokio::{
+        runtime,
+        select,
+        sync::{
+            mpsc::{
+                self,
+                channel,
+            },
+            oneshot,
+        },
+    },
 };
 
 #[derive(Serialize, Deserialize)]
@@ -110,7 +112,7 @@ pub struct CardStream {
 }
 
 impl CardStream {
-    pub fn new(log: &loga::StandardLog) -> Self {
+    pub fn new(log: &loga::Log) -> Self {
         let alive = Arc::new(AtomicBool::new(true));
         let (stream_tx, stream_rx) = channel(100);
         let log = log.clone();
@@ -135,10 +137,7 @@ impl CardStream {
                                 pcsc_context = match pcsc::Context::establish(pcsc::Scope::User) {
                                     Ok(p) => p,
                                     Err(e) => {
-                                        log.log_err(
-                                            loga::StandardFlag::Warning,
-                                            e.context("Error establishing pcsc context"),
-                                        );
+                                        log.log_err(loga::WARN, e.context("Error establishing pcsc context"));
                                         sleep(Duration::from_secs(1));
                                         return None;
                                     },
@@ -146,10 +145,7 @@ impl CardStream {
                                 let mut reader_names = match pcsc_context.list_readers_owned() {
                                     Ok(r) => r,
                                     Err(e) => {
-                                        log.log_err(
-                                            loga::StandardFlag::Warning,
-                                            e.context("Error listing initial pcsc readers"),
-                                        );
+                                        log.log_err(loga::WARN, e.context("Error listing initial pcsc readers"));
                                         sleep(Duration::from_secs(1));
                                         return None;
                                     },
@@ -184,7 +180,7 @@ impl CardStream {
                                 Err(e) => return Err(e),
                             };
                             for reader_state in &mut watch {
-                                bb!{
+                                shed!{
                                     'detect _;
                                     let old_state = reader_state.current_state();
                                     let new_state = reader_state.event_state();
@@ -198,7 +194,7 @@ impl CardStream {
                                         new_state.contains(pcsc::State::PRESENT) {
                                         match (|| {
                                             // TODO https://gitlab.com/openpgp-card/openpgp-card/-/issues/72
-                                            let Some(backend) = PcscBackend:: card_backends(None) ?.next() else {
+                                            let Some(backend) = PcscBackend::card_backends(None)?.next() else {
                                                 return Ok(());
                                             };
                                             let backend = backend?;
@@ -208,15 +204,11 @@ impl CardStream {
                                         })() {
                                             Ok(_) => (),
                                             Err(e) => {
-                                                log.log_err(
-                                                    loga::StandardFlag::Warning,
-                                                    e.context("Error handling card"),
-                                                );
+                                                log.log_err(loga::WARN, e.context("Error handling card"));
                                             },
                                         }
                                     }
                                 };
-
                                 reader_state.sync_current_state();
                             }
                             return Ok(false);
@@ -228,7 +220,7 @@ impl CardStream {
                             },
                             Err(e) => {
                                 log.log_err(
-                                    loga::StandardFlag::Warning,
+                                    loga::WARN,
                                     e.context("Error waiting for next pcsc status change event"),
                                 );
                                 sleep(Duration::from_secs(1));
@@ -392,7 +384,6 @@ pub struct CardThreadDecryptor(CardThread);
 impl CardThreadDecryptor {
     pub async fn decrypt(mut self, body: Vec<u8>) -> Result<MaybeNeedTouch, UiErr> {
         self.0.decrypt_tx.send(body).await.unwrap();
-
         select!{
             _ = self.0.need_touch_rx.recv() => {
                 return Ok(MaybeNeedTouch::NeedTouch(CardThreadNeedTouch(self.0)));

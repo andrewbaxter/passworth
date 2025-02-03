@@ -1,0 +1,333 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Config",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "v1"
+      ],
+      "properties": {
+        "v1": {
+          "$ref": "#/definitions/Config"
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "Config": {
+      "type": "object",
+      "required": [
+        "access",
+        "auth_factors",
+        "data_path",
+        "lock_timeout",
+        "root_factor"
+      ],
+      "properties": {
+        "access": {
+          "description": "Permissions for processes to access subtrees.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ConfigPermissionRule"
+          }
+        },
+        "auth_factors": {
+          "description": "How to unlock the database when credentials are accessed. These form a tree via references.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ConfigAuthFactor"
+          }
+        },
+        "data_path": {
+          "description": "A directory where this will store sqlite databases.",
+          "type": "string"
+        },
+        "lock_timeout": {
+          "description": "Lock if no successful activity for this many seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "root_factor": {
+          "description": "Which factor forms the root of the tree (provides the database key).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigAuthFactor": {
+      "type": "object",
+      "required": [
+        "description",
+        "id",
+        "variant"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "variant": {
+          "$ref": "#/definitions/ConfigAuthFactorVariant"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigAuthFactorVariant": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "password",
+            "recovery_code"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "and"
+          ],
+          "properties": {
+            "and": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "or"
+          ],
+          "properties": {
+            "or": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "smartcards"
+          ],
+          "properties": {
+            "smartcards": {
+              "$ref": "#/definitions/ConfigCredSmartcards"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ConfigCredSmartcard": {
+      "type": "object",
+      "required": [
+        "fingerprint"
+      ],
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "pin": {
+          "description": "If pinentry, this must be null and will use the entered pin.  If not pinentry, either uses the config-specified pin or no pin.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigCredSmartcards": {
+      "type": "object",
+      "required": [
+        "smartcards"
+      ],
+      "properties": {
+        "fixed_pin": {
+          "description": "If true, use the pin preconfigured for each smartcard instead of showing pinentry.",
+          "default": false,
+          "type": "boolean"
+        },
+        "smartcards": {
+          "description": "List of cards that can be used.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ConfigCredSmartcard"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigPermissionRule": {
+      "type": "object",
+      "required": [
+        "paths"
+      ],
+      "properties": {
+        "match_binary": {
+          "description": "Match requesting processes against the process or a parent process binary path. This only applies to binaries available in the root filesystem namespace.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MatchBinary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "match_systemd": {
+          "description": "Match requesting processes against a systemd service name (via service pid).",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "match_user": {
+          "description": "Match requesting processes against the process or a parent process owner.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MatchUser"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "paths": {
+          "description": "Paths to which this rule applies. To apply to everything, use the empty path `\"\"`. In the format `/seg/seg/.../seg` - no initial slash. Segments are literals or `*`, and `*` and `/` can be escaped with a backslash. `*` is a wildcard, and must appear as a whole segment.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "permit_derive": {
+          "description": "Permission to lock/unlock and indirectly access data via derivation - totp, asymmetric signatures, decryption",
+          "default": false,
+          "type": "boolean"
+        },
+        "permit_lock": {
+          "description": "Permission to explicitly lock or unlock.",
+          "default": false,
+          "type": "boolean"
+        },
+        "permit_read": {
+          "description": "Lock/unlock or read the credential data itself",
+          "default": false,
+          "type": "boolean"
+        },
+        "permit_write": {
+          "description": "Lock/unlock, write or read the credential data itself.",
+          "default": false,
+          "type": "boolean"
+        },
+        "prompt": {
+          "description": "Configure if access requires prompting.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConfigPrompt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigPrompt": {
+      "type": "object",
+      "required": [
+        "description"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "remember_seconds": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchBinary": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "walk_ancestors": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchUser": {
+      "type": "object",
+      "properties": {
+        "group": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserGroupId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "user": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserGroupId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "walk_ancestors": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "UserGroupId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      ]
+    }
+  }
+}

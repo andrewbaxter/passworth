@@ -1,51 +1,53 @@
-use std::{
-    path::PathBuf,
-    env,
-};
-use good_ormning::sqlite::{
-    new_delete,
-    new_insert,
-    new_select,
-    query::{
-        expr::{
-            BinOp,
-            ComputeType,
-            Expr,
+use {
+    good_ormning::sqlite::{
+        new_delete,
+        new_insert,
+        new_select,
+        query::{
+            expr::{
+                BinOp,
+                ComputeType,
+                Expr,
+            },
+            helpers::{
+                expr_and,
+                expr_field_eq,
+                field_param,
+                set_field,
+            },
         },
-        helpers::{
-            eq_field,
-            expr_and,
-            field_param,
-            set_field,
+        schema::{
+            constraint::{
+                ConstraintType,
+                PrimaryKeyDef,
+            },
+            field::{
+                field_bytes,
+                field_i32,
+                field_str,
+                field_utctime_ms,
+                Field,
+            },
         },
+        types::{
+            type_i32,
+            SimpleSimpleType,
+            SimpleType,
+        },
+        QueryResCount,
+        Version,
     },
-    schema::{
-        constraint::{
-            ConstraintType,
-            PrimaryKeyDef,
-        },
-        field::{
-            field_bytes,
-            field_i32,
-            field_str,
-            field_utctime_ms,
-            Field,
-        },
+    std::{
+        env,
+        path::PathBuf,
     },
-    types::{
-        type_i32,
-        SimpleSimpleType,
-        SimpleType,
-    },
-    QueryResCount,
-    Version,
 };
 
 fn expr_max(field: &Field) -> Expr {
     let type_ = field.type_.type_.clone();
     return Expr::Call {
         func: "max".to_string(),
-        args: vec![Expr::Field(field.clone())],
+        args: vec![Expr::field(&field)],
         compute_type: ComputeType::new(move |_ctx, _path, _args| {
             return Some(type_.clone());
         }),
@@ -54,7 +56,7 @@ fn expr_max(field: &Field) -> Expr {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    let root = PathBuf::from(&env::var("CARGO_MANIFEST_DIR").unwrap());
+    let out = PathBuf::from(&env::var("OUT_DIR").unwrap());
 
     // Unencrypted
     {
@@ -86,7 +88,7 @@ fn main() {
                     .build_query("config_set", QueryResCount::None),
             );
             methods.push(new_select(&table).where_(Expr::BinOp {
-                left: Box::new(Expr::Field(unique.clone())),
+                left: Box::new(Expr::field(&unique)),
                 op: BinOp::Equals,
                 right: Box::new(Expr::LitI32(0)),
             }).return_field(&data).build_query("config_get", QueryResCount::MaybeOne));
@@ -111,7 +113,7 @@ fn main() {
             );
             methods.push(
                 new_delete(&table)
-                    .where_(eq_field("id", &id))
+                    .where_(expr_field_eq("id", &id))
                     .return_named("ok", Expr::LitI32(0))
                     .build_query("factor_delete", QueryResCount::MaybeOne),
             );
@@ -124,7 +126,7 @@ fn main() {
         }
 
         // Generate
-        good_ormning::sqlite::generate(&root.join("src/bin/serverlib/pubdb.rs"), vec![
+        good_ormning::sqlite::generate(&out.join("pubdb.rs"), vec![
             // Versions
             (0usize, latest_version)
         ], methods).unwrap();
@@ -152,7 +154,7 @@ fn main() {
                 .where_(expr_and(vec![
                     //. .
                     Expr::BinOp {
-                        left: Box::new(Expr::Field(path.clone())),
+                        left: Box::new(Expr::field(&path)),
                         op: BinOp::Like,
                         right: Box::new(Expr::Call {
                             func: "format".to_string(),
@@ -163,12 +165,12 @@ fn main() {
                         }),
                     },
                     Expr::BinOp {
-                        left: Box::new(Expr::Field(rev_id.clone())),
+                        left: Box::new(Expr::field(&rev_id)),
                         op: BinOp::LessThan,
                         right: Box::new(field_param("at", &rev_id)),
                     }
                 ]))
-                .group(vec![Expr::Field(path.clone())])
+                .group(vec![Expr::field(&path)])
                 .return_named("rev_id", expr_max(&rev_id))
                 .return_field(&rev_date)
                 .return_field(&path)
@@ -184,7 +186,7 @@ fn main() {
                     //. .
                     Expr::BinOp {
                         left: Box::new(Expr::BinOp {
-                            left: Box::new(Expr::Field(path.clone())),
+                            left: Box::new(Expr::field(&path)),
                             op: BinOp::Like,
                             right: Box::new(Expr::Call {
                                 func: "format".to_string(),
@@ -198,7 +200,7 @@ fn main() {
                         right: Box::new(Expr::BinOp {
                             left: Box::new(Expr::Call {
                                 func: "instr".to_string(),
-                                args: vec![field_param("prefix", &path), Expr::Field(path.clone())],
+                                args: vec![field_param("prefix", &path), Expr::field(&path)],
                                 compute_type: ComputeType::new(move |_ctx, _path, _args| {
                                     return Some(type_i32().build());
                                 }),
@@ -208,12 +210,12 @@ fn main() {
                         }),
                     },
                     Expr::BinOp {
-                        left: Box::new(Expr::Field(rev_id.clone())),
+                        left: Box::new(Expr::field(&rev_id)),
                         op: BinOp::LessThan,
                         right: Box::new(field_param("at", &rev_id)),
                     }
                 ]))
-                .group(vec![Expr::Field(path.clone())])
+                .group(vec![Expr::field(&path)])
                 .return_named("rev_id", expr_max(&rev_id))
                 .return_field(&rev_date)
                 .return_field(&path)
@@ -227,7 +229,7 @@ fn main() {
         }
 
         // Generate
-        good_ormning::sqlite::generate(&root.join("src/bin/serverlib/privdb.rs"), vec![
+        good_ormning::sqlite::generate(&out.join("privdb.rs"), vec![
             // Versions
             (0usize, latest_version)
         ], queries).unwrap();

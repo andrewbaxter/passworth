@@ -1,4 +1,4 @@
-use loga::ea;
+use {loga::ea};
 
 /// Convert a specific path (segments) into an escaped string for database prefix
 /// lookup. Each segment starts with a `/`.

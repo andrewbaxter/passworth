@@ -1,100 +1,99 @@
-use std::{
-    cell::RefCell,
-    collections::{
-        hash_map::Entry,
-        HashMap,
-        HashSet,
+use {
+    super::{
+        dbutil::open_privdb,
+        privdb,
     },
-    future::Future,
-    io::Write,
-    path::PathBuf,
-    rc::Rc,
-    sync::{
-        Arc,
-        Mutex,
+    crate::{
+        FactorTree,
+        FactorTreeVariant,
     },
-    time::{
-        Duration,
-        Instant,
+    flowcontrol::shed,
+    gtk4::{
+        gdk::{
+            Key,
+            ModifierType,
+        },
+        glib::object::Cast,
+        prelude::{
+            BoxExt,
+            ButtonExt,
+            EditableExt,
+            EntryExt,
+            GridExt,
+            GtkWindowExt,
+            RangeExt,
+            RootExt,
+            WidgetExt,
+        },
+        Align,
+        Application,
+        Label,
     },
-};
-use loga::{
-    ea,
-    ResultContext,
-    StandardFlag,
-    StandardLog,
-};
-use openpgp_card_sequoia::{
-    state::Open,
-};
-use passworth::{
-    bb,
-    config::latest::ConfigCredSmartcards,
-    crypto::{
-        self,
-        get_card_pubkey,
-        local_decrypt,
-        local_encrypt,
-        CardStream,
+    loga::{
+        conversion::ResultIgnore,
+        ea,
+        Log,
+        ResultContext,
     },
-    error::{
-        FromAnyErr,
-        ToUiErr,
-        UiErr,
+    openpgp_card_sequoia::state::Open,
+    passworth::{
+        config::latest::ConfigCredSmartcards,
+        crypto::{
+            self,
+            get_card_pubkey,
+            local_decrypt,
+            local_encrypt,
+            CardStream,
+        },
+        error::{
+            FromAnyErr,
+            ToUiErr,
+            UiErr,
+        },
+        generate::{
+            self,
+            BIP39,
+            BIP39_PHRASELEN,
+        },
     },
-    generate::{
-        self,
-        BIP39,
-        BIP39_PHRASELEN,
+    rand::{
+        rng,
+        RngCore,
     },
-    IgnoreErr,
-};
-use rand::{
-    thread_rng,
-    RngCore,
-};
-use rusqlite::Connection;
-use sequoia_openpgp::serialize::stream::{
-    Encryptor2,
-    LiteralWriter,
-    Message,
-    Recipient,
-};
-use tokio::{
-    select,
-    sync::{
-        mpsc,
-        oneshot,
+    rusqlite::Connection,
+    sequoia_openpgp::serialize::stream::{
+        Encryptor2,
+        LiteralWriter,
+        Message,
+        Recipient,
     },
-};
-use crate::{
-    FactorTree,
-    FactorTreeVariant,
-};
-use super::{
-    dbutil::open_privdb,
-    privdb,
-};
-use gtk4::{
-    gdk::{
-        Key,
-        ModifierType,
+    std::{
+        cell::RefCell,
+        collections::{
+            hash_map::Entry,
+            HashMap,
+            HashSet,
+        },
+        future::Future,
+        io::Write,
+        path::PathBuf,
+        rc::Rc,
+        sync::{
+            Arc,
+            Mutex,
+        },
+        time::{
+            Duration,
+            Instant,
+        },
     },
-    glib::object::Cast,
-    prelude::{
-        BoxExt,
-        ButtonExt,
-        EditableExt,
-        EntryExt,
-        GridExt,
-        GtkWindowExt,
-        RangeExt,
-        RootExt,
-        WidgetExt,
+    tokio::{
+        select,
+        sync::{
+            mpsc,
+            oneshot,
+        },
     },
-    Align,
-    Application,
-    Label,
 };
 
 fn add_shortcut(w: &impl gtk4::glib::object::IsA<gtk4::Widget>, keys: &[Key], f: impl 'static + Clone + Fn()) {
@@ -118,7 +117,7 @@ fn add_shortcut(w: &impl gtk4::glib::object::IsA<gtk4::Widget>, keys: &[Key], f:
 }
 
 pub struct FgState {
-    pub log: StandardLog,
+    pub log: Log,
     pub last_prompts: Mutex<HashMap<usize, Instant>>,
 }
 
@@ -234,7 +233,7 @@ async fn do_form_dialog<
 fn gen_token() -> Vec<u8> {
     let mut out = Vec::new();
     out.resize(32, 0u8);
-    thread_rng().fill_bytes(&mut out);
+    rng().fill_bytes(&mut out);
     return out;
 }
 
@@ -335,7 +334,7 @@ async fn ui_get_smartcard(
 }
 
 async fn ui_unlock_smartcard(
-    log: &StandardLog,
+    log: &Log,
     app: &Application,
     initial_warning: Option<String>,
     title: Title,
@@ -435,11 +434,10 @@ async fn ui_unlock_smartcard(
                     },
                 };
             let (card, pubkey) = get_card_pubkey(card).await?;
-            let Some(
-                card_config
-            ) = config.smartcards.iter().filter(|c| c.fingerprint == pubkey.fingerprint().to_string()).next() else {
-                return Ok(None);
-            };
+            let Some(card_config) =
+                config.smartcards.iter().filter(|c| c.fingerprint == pubkey.fingerprint().to_string()).next() else {
+                    return Ok(None);
+                };
             let card = card.enter_pin(card_config.pin.clone().or(pin)).await?;
             match card
                 .decrypt(
@@ -476,13 +474,13 @@ async fn ui_unlock_smartcard(
             Ok(r) => return Ok(r),
             Err(e) => match e {
                 UiErr::Internal(i) => {
-                    log.log_err(StandardFlag::Warning, i);
+                    log.log_err(loga::WARN, i);
                     warning = Some("Internal error, check logs for details.".to_string());
                     continue;
                 },
                 UiErr::External(e, i) => {
                     if let Some(i) = i {
-                        log.log_err(StandardFlag::Warning, i);
+                        log.log_err(loga::WARN, i);
                     }
                     warning = Some(e);
                     continue;
@@ -615,7 +613,7 @@ async fn ui_loop<
     T,
     F: Future<Output = Result<Option<T>, UiErr>>,
     N: FnMut(Application, Option<String>) -> F,
->(log: &loga::StandardLog, app: &Application, mut f: N) -> Result<Option<T>, loga::Error> {
+>(log: &loga::Log, app: &Application, mut f: N) -> Result<Option<T>, loga::Error> {
     let mut show_error = None;
     loop {
         match f(app.clone(), show_error.take()).await {
@@ -623,13 +621,13 @@ async fn ui_loop<
             Err(e) => match e {
                 UiErr::External(e, e_internal) => {
                     if let Some(e_internal) = e_internal {
-                        log.log_err(StandardFlag::Warning, e_internal);
+                        log.log_err(loga::WARN, e_internal);
                     };
                     show_error = Some(e);
                 },
                 UiErr::Internal(e) => {
                     log.log_err(
-                        StandardFlag::Warning,
+                        loga::WARN,
                         e.context("An unexpected issue occurred while unlocking/initializing unlock credentials."),
                     );
                     show_error = Some("An unexpected error occurred, see log for details.".to_string());
@@ -722,22 +720,21 @@ async fn do_creds(
                                         }
                                     }
                                     if !already_unlocked {
-                                        let Some(
-                                            child
-                                        ) = ui_choose(
-                                            &app,
-                                            show_error.take(),
-                                            Title::Unlock(new.desc.to_string()),
-                                            &prev_children
-                                        ).await else {
-                                            return Ok(None);
-                                        };
+                                        let Some(child) =
+                                            ui_choose(
+                                                &app,
+                                                show_error.take(),
+                                                Title::Unlock(new.desc.to_string()),
+                                                &prev_children,
+                                            ).await else {
+                                                return Ok(None);
+                                            };
                                         stack.push((Either::Prev(child), true));
                                     }
                                 }
                             } else {
                                 // Get or token
-                                let token = bb!{
+                                let token = shed!{
                                     'found _;
                                     if let Some(FactorTreeVariant::Or(prev_children)) = prev_variant {
                                         for child in prev_children {
@@ -768,7 +765,7 @@ async fn do_creds(
                                     None => HashMap::new(),
                                 };
                                 for child in children {
-                                    let Entry:: Vacant(v) = state.entry(child.id.clone()) else {
+                                    let Entry::Vacant(v) = state.entry(child.id.clone()) else {
                                         continue;
                                     };
                                     v.insert(local_encrypt(new_tokens.get(&child.id).unwrap(), &token));
@@ -841,26 +838,25 @@ async fn do_creds(
                                     );
                                 }
                             });
-                            let Some(
-                                password
-                            ) = do_form_dialog(
-                                &app,
-                                show_error.take(),
-                                Title::Initialize(new.desc.clone()),
-                                &layout,
-                                None,
-                                {
-                                    move || {
-                                        if password.text() == confirm_password.text() {
-                                            return Ok(password.text().as_bytes().to_vec());
-                                        } else {
-                                            return Err("Password mismatch".to_string());
+                            let Some(password) =
+                                do_form_dialog(
+                                    &app,
+                                    show_error.take(),
+                                    Title::Initialize(new.desc.clone()),
+                                    &layout,
+                                    None,
+                                    {
+                                        move || {
+                                            if password.text() == confirm_password.text() {
+                                                return Ok(password.text().as_bytes().to_vec());
+                                            } else {
+                                                return Err("Password mismatch".to_string());
+                                            }
                                         }
-                                    }
-                                }
-                            ).await else {
-                                return Ok(None);
-                            };
+                                    },
+                                ).await else {
+                                    return Ok(None);
+                                };
                             new_tokens.insert(new.id.clone(), password);
                         },
                         FactorTreeVariant::Smartcards(c) => {
@@ -873,24 +869,23 @@ async fn do_creds(
                             };
 
                             // Get token from old smartcards or generate a new one if there were none
-                            let token = bb!{
+                            let token = shed!{
                                 'found _;
                                 if let Some(key) = prev_tokens.get(&new.id) {
                                     break 'found key.clone();
                                 }
                                 if let Some(FactorTreeVariant::Smartcards(prev_children)) = prev_variant {
-                                    let Some(
-                                        token
-                                    ) = ui_unlock_smartcard(
-                                        &log,
-                                        &app,
-                                        show_error.take(),
-                                        Title::Initialize(new.desc.to_string()),
-                                        prev_children,
-                                        &state
-                                    ).await ? else {
-                                        return Ok(None);
-                                    };
+                                    let Some(token) =
+                                        ui_unlock_smartcard(
+                                            &log,
+                                            &app,
+                                            show_error.take(),
+                                            Title::Initialize(new.desc.to_string()),
+                                            prev_children,
+                                            &state,
+                                        ).await? else {
+                                            return Ok(None);
+                                        };
                                     break 'found token;
                                 }
                                 break 'found gen_token();
@@ -906,26 +901,24 @@ async fn do_creds(
                             }
                             let mut card_stream = CardStream::new(&log);
                             while !remaining_new_fingerprints.is_empty() {
-                                let Some(
-                                    mut card
-                                ) = ui_get_smartcard(
-                                    &app,
-                                    &mut card_stream,
-                                    show_error.take(),
-                                    Title::Initialize(new.desc.to_string()),
-                                    &remaining_new_fingerprints.iter().map(|x| x.as_str()).collect::<Vec<_>>()
-                                ).await else {
-                                    return Ok(None);
-                                };
+                                let Some(mut card) =
+                                    ui_get_smartcard(
+                                        &app,
+                                        &mut card_stream,
+                                        show_error.take(),
+                                        Title::Initialize(new.desc.to_string()),
+                                        &remaining_new_fingerprints.iter().map(|x| x.as_str()).collect::<Vec<_>>(),
+                                    ).await else {
+                                        return Ok(None);
+                                    };
                                 let mut card_tx = card.transaction().context("Error starting smartcard transaction")?;
-                                let Some(
-                                    pubkey
-                                ) = card_tx.public_key(
-                                    openpgp_card_sequoia::types::KeyType::Decryption
-                                ).map_err(|e| loga::err(e.to_string())) ? else {
-                                    show_error = Some("Couldn't determine public key for card.".to_string());
-                                    continue;
-                                };
+                                let Some(pubkey) =
+                                    card_tx
+                                        .public_key(openpgp_card_sequoia::types::KeyType::Decryption)
+                                        .map_err(|e| loga::err(e.to_string()))? else {
+                                        show_error = Some("Couldn't determine public key for card.".to_string());
+                                        continue;
+                                    };
                                 let fingerprint = pubkey.fingerprint().to_string();
                                 if !remaining_new_fingerprints.remove(&fingerprint) {
                                     show_error =
@@ -974,33 +967,31 @@ async fn do_creds(
                                 form_layout.attach(&halign_start(word_label), base_col + 1, row, 1, 1);
                             }
                             layout.append(&form_layout);
-                            let Some(
-                                _
-                            ) = do_form_dialog(
-                                &app,
-                                show_error.take(),
-                                Title::Initialize(new.desc.to_string()),
-                                &layout,
-                                None,
-                                || {
-                                    return Ok(());
-                                }
-                            ).await else {
-                                return Ok(None);
-                            };
+                            let Some(_) =
+                                do_form_dialog(
+                                    &app,
+                                    show_error.take(),
+                                    Title::Initialize(new.desc.to_string()),
+                                    &layout,
+                                    None,
+                                    || {
+                                        return Ok(());
+                                    },
+                                ).await else {
+                                    return Ok(None);
+                                };
                             let phrase = phrase.join(" ").as_bytes().to_vec();
 
                             // Confirm
-                            let Some(
-                                confirm_passphrase
-                            ) = ui_recovery_entry(
-                                &app,
-                                show_error.take(),
-                                Title::Initialize(new.desc.to_string()),
-                                "Confirm the phrase."
-                            ).await else {
-                                return Ok(None);
-                            };
+                            let Some(confirm_passphrase) =
+                                ui_recovery_entry(
+                                    &app,
+                                    show_error.take(),
+                                    Title::Initialize(new.desc.to_string()),
+                                    "Confirm the phrase.",
+                                ).await else {
+                                    return Ok(None);
+                                };
                             if confirm_passphrase != phrase {
                                 return Err(
                                     UiErr::external(
@@ -1069,16 +1060,15 @@ async fn do_creds(
                             }
                             if !done {
                                 stack.push((at.clone(), false));
-                                let Some(
-                                    child
-                                ) = ui_choose(
-                                    &app,
-                                    show_error.take(),
-                                    Title::Unlock(prev.desc.to_string()),
-                                    children
-                                ).await else {
-                                    return Ok(None);
-                                };
+                                let Some(child) =
+                                    ui_choose(
+                                        &app,
+                                        show_error.take(),
+                                        Title::Unlock(prev.desc.to_string()),
+                                        children,
+                                    ).await else {
+                                        return Ok(None);
+                                    };
                                 stack.push((Either::Prev(child), true));
                             }
                         },
@@ -1094,22 +1084,21 @@ async fn do_creds(
                                 password
                             };
                             layout.append(&form_layout);
-                            let Some(
-                                password
-                            ) = do_form_dialog(
-                                &app,
-                                show_error.take(),
-                                Title::Unlock(prev.desc.to_string()),
-                                &layout,
-                                None,
-                                {
-                                    move || {
-                                        return Ok(password.text().as_bytes().to_vec());
-                                    }
-                                }
-                            ).await else {
-                                return Ok(None);
-                            };
+                            let Some(password) =
+                                do_form_dialog(
+                                    &app,
+                                    show_error.take(),
+                                    Title::Unlock(prev.desc.to_string()),
+                                    &layout,
+                                    None,
+                                    {
+                                        move || {
+                                            return Ok(password.text().as_bytes().to_vec());
+                                        }
+                                    },
+                                ).await else {
+                                    return Ok(None);
+                                };
                             prev_tokens.insert(prev.id.clone(), password);
                         },
                         FactorTreeVariant::Smartcards(c) => {
@@ -1119,31 +1108,29 @@ async fn do_creds(
                                         .get(&prev.id)
                                         .stack_context(&log, "Pretoken for factor missing in database")?,
                                 ).stack_context(&log, "Unable to deserialize smartcards state")?;
-                            let Some(
-                                token
-                            ) = ui_unlock_smartcard(
-                                &log,
-                                &app,
-                                show_error.take(),
-                                Title::Unlock(prev.desc.to_string()),
-                                c,
-                                &state
-                            ).await ? else {
-                                return Ok(None);
-                            };
+                            let Some(token) =
+                                ui_unlock_smartcard(
+                                    &log,
+                                    &app,
+                                    show_error.take(),
+                                    Title::Unlock(prev.desc.to_string()),
+                                    c,
+                                    &state,
+                                ).await? else {
+                                    return Ok(None);
+                                };
                             prev_tokens.insert(prev.id.clone(), token);
                         },
                         FactorTreeVariant::RecoveryPhrase => {
-                            let Some(
-                                phrase
-                            ) = ui_recovery_entry(
-                                &app,
-                                show_error.take(),
-                                Title::Unlock(prev.desc.to_string()),
-                                "Enter the recovery phrase words in the correct order."
-                            ).await else {
-                                return Ok(None);
-                            };
+                            let Some(phrase) =
+                                ui_recovery_entry(
+                                    &app,
+                                    show_error.take(),
+                                    Title::Unlock(prev.desc.to_string()),
+                                    "Enter the recovery phrase words in the correct order.",
+                                ).await else {
+                                    return Ok(None);
+                                };
                             prev_tokens.insert(prev.id.clone(), phrase);
                         },
                     }
@@ -1250,7 +1237,7 @@ pub async fn do_initialize(
             show_err,
             Either::New(args.root_factor.clone(), args.prev_root_factor.clone()),
         )
-    }).await ? else {
+    }).await? else {
         return Ok(None);
     };
     return Ok(Some(B2FInitializeResult {

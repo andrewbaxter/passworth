@@ -1,40 +1,30 @@
-use std::{
-    env,
-    io::Write,
-};
-use aargvark::{
-    vark,
-    Aargvark,
-    AargvarkFile,
-    AargvarkFromStr,
-};
-use loga::{
-    ea,
-    fatal,
-    ResultContext,
-    StandardFlag,
-    StandardLog,
-};
-use passworth::{
-    crypto::{
-        get_card_pubkey,
-        CardStream,
+use {
+    aargvark::{
+        traits_impls::{
+            AargvarkFile,
+            AargvarkFromStr,
+        },
+        vark,
+        Aargvark,
     },
-    ioutil::{
-        read_packet,
-        write_packet,
+    loga::{
+        fatal,
+        Log,
     },
-    proto::{
-        C2SGenerateVariant,
-        C2S,
-        DEFAULT_SOCKET,
-        ENV_SOCKET,
+    passworth::{
+        crypto::{
+            get_card_pubkey,
+            CardStream,
+        },
+        proto::{
+            self,
+            ipc_path,
+            C2SGenerateVariant,
+        },
     },
-};
-use serde::de::DeserializeOwned;
-use tokio::net::{
-    UnixSocket,
-    UnixStream,
+    std::{
+        io::Write,
+    },
 };
 
 struct PassworthPath(Vec<String>);
@@ -44,8 +34,10 @@ impl AargvarkFromStr for PassworthPath {
         return Ok(PassworthPath(serde_json::from_str(s).map_err(|e| e.to_string())?));
     }
 
-    fn build_help_pattern(_state: &mut aargvark::HelpState) -> aargvark::HelpPattern {
-        return aargvark::HelpPattern(vec![aargvark::HelpPatternElement::Type("JSON ARRAY[STRING]".to_string())]);
+    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
+        return aargvark::help::HelpPattern(
+            vec![aargvark::help::HelpPatternElement::Type("JSON ARRAY[STRING]".to_string())],
+        );
     }
 }
 
@@ -56,9 +48,9 @@ impl AargvarkFromStr for PassworthSet {
         return Ok(PassworthSet(serde_json::from_str(s).map_err(|e| e.to_string())?));
     }
 
-    fn build_help_pattern(_state: &mut aargvark::HelpState) -> aargvark::HelpPattern {
-        return aargvark::HelpPattern(
-            vec![aargvark::HelpPatternElement::Type("JSON ARRAY[ARRAY[STRING], ANY]".to_string())],
+    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
+        return aargvark::help::HelpPattern(
+            vec![aargvark::help::HelpPatternElement::Type("JSON ARRAY[ARRAY[STRING], ANY]".to_string())],
         );
     }
 }
@@ -152,56 +144,40 @@ enum Command {
     ScanCards,
 }
 
-async fn req<T: DeserializeOwned>(sock: &mut tokio::net::UnixStream, body: &C2S) -> Result<T, loga::Error> {
-    write_packet(&mut *sock, &serde_json::to_vec(body).unwrap()).await?;
-    return Ok(read_packet::<T>(sock).await.context("Connection closed by server before response")??);
-}
-
-async fn sock() -> Result<UnixStream, loga::Error> {
-    let sock_path = env::var_os(ENV_SOCKET).unwrap_or(DEFAULT_SOCKET.into());
-    let sock = UnixSocket::new_stream().context("Error allocating socket")?;
+async fn req<T: proto::msg::ReqTrait>(body: T) -> Result<T::Resp, loga::Error> {
     return Ok(
-        sock
-            .connect(&sock_path)
-            .await
-            .context_with("Error connecting to passworth socket", ea!(path = sock_path.to_string_lossy()))?,
+        proto::msg::Client::new(ipc_path()).await.map_err(loga::err)?.send_req(body).await.map_err(loga::err)?,
     );
 }
 
 async fn main2() -> Result<(), loga::Error> {
-    let log = StandardLog::new().with_flags(&[StandardFlag::Error, StandardFlag::Warning, StandardFlag::Info]);
+    let log = Log::new_root(loga::INFO);
     match vark::<Command>() {
         Command::Unlock => {
-            let mut stream = sock().await?;
-            req::<()>(&mut stream, &C2S::Unlock).await?;
+            req(proto::ReqUnlock).await?;
         },
         Command::Lock => {
-            let mut stream = sock().await?;
-            req::<()>(&mut stream, &C2S::Lock).await?;
+            req(proto::ReqLock).await?;
         },
         Command::Get { paths, at } => {
-            let mut stream = sock().await?;
-            let res = req::<serde_json::Value>(&mut stream, &C2S::Get {
+            let res = req(proto::ReqGet {
                 paths: paths.into_iter().map(|x| x.0).collect(),
                 at: at,
             }).await?;
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
         Command::Set(pairs) => {
-            let mut stream = sock().await?;
-            req::<()>(&mut stream, &C2S::Set(pairs.into_iter().map(|p| p.0).collect())).await?;
+            req(proto::ReqSet(pairs.into_iter().map(|p| p.0).collect())).await?;
         },
         Command::Move { from, to, overwrite } => {
-            let mut stream = sock().await?;
-            req::<()>(&mut stream, &C2S::Move {
+            req(proto::ReqMove {
                 from: from.0,
                 to: to.0,
                 overwrite: overwrite.is_some(),
             }).await?;
         },
         Command::Generate { path, variant, overwrite } => {
-            let mut stream = sock().await?;
-            let res = req::<String>(&mut stream, &C2S::Generate {
+            let res = req(proto::ReqGenerate {
                 path: path.0,
                 variant: match variant {
                     GenerateVariant::Bytes { length } => C2SGenerateVariant::Bytes { length: length },
@@ -219,8 +195,7 @@ async fn main2() -> Result<(), loga::Error> {
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
         Command::PgpSign { key, data } => {
-            let mut stream = sock().await?;
-            let res = req::<Vec<u8>>(&mut stream, &C2S::PgpSign {
+            let res = req(proto::ReqPgpSign {
                 key: key.0,
                 data: data.value,
             }).await?;
@@ -228,8 +203,7 @@ async fn main2() -> Result<(), loga::Error> {
             std::io::stdout().flush().unwrap();
         },
         Command::PgpDecrypt { key, data } => {
-            let mut stream = sock().await?;
-            let res = req::<Vec<u8>>(&mut stream, &C2S::PgpDecrypt {
+            let res = req(proto::ReqPgpDecrypt {
                 key: key.0,
                 data: data.value,
             }).await?;
@@ -237,16 +211,14 @@ async fn main2() -> Result<(), loga::Error> {
             std::io::stdout().flush().unwrap();
         },
         Command::ListRevisions { paths, at } => {
-            let mut stream = sock().await?;
-            let res = req::<serde_json::Value>(&mut stream, &C2S::GetRevisions {
+            let res = req(proto::ReqGetRevisions {
                 paths: paths.into_iter().map(|x| x.0).collect(),
                 at: at,
             }).await?;
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
         Command::Revert { paths, at } => {
-            let mut stream = sock().await?;
-            req::<()>(&mut stream, &C2S::Revert {
+            req(proto::ReqRevert {
                 paths: paths.into_iter().map(|x| x.0).collect(),
                 at: at,
             }).await?;
@@ -264,7 +236,7 @@ async fn main2() -> Result<(), loga::Error> {
                             },
                             passworth::error::UiErr::InternalUnresolvable(e) => e,
                         };
-                        log.log_err(StandardFlag::Warning, e.context("Error getting gpg key for card"));
+                        log.log_err(loga::WARN, e.context("Error getting gpg key for card"));
                         continue;
                     },
                 };

@@ -1,18 +1,20 @@
-use std::{
-    collections::{
-        HashMap,
-        HashSet,
+use {
+    loga::{
+        ea,
+        Log,
     },
-    sync::Arc,
-};
-use loga::{
-    ea,
-    StandardLog,
-};
-use passworth::config::latest::{
-    ConfigAuthFactor,
-    ConfigAuthFactorVariant,
-    ConfigCredSmartcards,
+    passworth::config::latest::{
+        ConfigAuthFactor,
+        ConfigAuthFactorVariant,
+        ConfigCredSmartcards,
+    },
+    std::{
+        collections::{
+            HashMap,
+            HashSet,
+        },
+        sync::Arc,
+    },
 };
 
 #[derive(PartialEq)]
@@ -37,7 +39,7 @@ pub fn build_factor_tree(
     out_factors: &mut HashMap<String, Arc<FactorTree>>,
     at_id: &String,
 ) -> Result<Arc<FactorTree>, loga::Error> {
-    let log = StandardLog::new().fork(ea!(factor = at_id));
+    let log = Log::new().fork(ea!(factor = at_id));
     let Some(at) = config_factors.get(at_id) else {
         return Err(log.err("Unknown factor id referenced by method or another factor"));
     };

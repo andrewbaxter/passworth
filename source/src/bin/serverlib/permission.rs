@@ -1,50 +1,49 @@
-use std::{
-    collections::HashMap,
-    io::ErrorKind,
-    mem::swap,
-    os::unix::fs::MetadataExt,
-    path::PathBuf,
-    sync::Arc,
-};
-use loga::{
-    ea,
-    DebugDisplay,
-    ErrContext,
-    ResultContext,
-    StandardFlag,
-    StandardLog,
-};
-use passworth::{
-    bb,
-    config::latest::{
+use {
+    super::datapath::{
+        glob_from_db_path,
+        GlobSeg,
+    },
+    crate::serverlib::fg::{
+        B2FPrompt,
+        B2F,
+    },
+    flowcontrol::shed,
+    loga::{
+        ea,
+        DebugDisplay,
+        ErrContext,
+        Log,
+        ResultContext,
+    },
+    passworth::config::latest::{
         ConfigPermissionRule,
         ConfigPrompt,
         MatchBinary,
         UserGroupId,
     },
-};
-use tokio::{
-    fs::{
-        read,
-        read_link,
+    std::{
+        collections::HashMap,
+        io::ErrorKind,
+        mem::swap,
+        os::unix::fs::MetadataExt,
+        path::PathBuf,
+        sync::Arc,
     },
-    sync::{
-        mpsc,
-        oneshot,
+    tokio::{
+        fs::{
+            read,
+            read_link,
+        },
+        sync::{
+            mpsc,
+            oneshot,
+        },
     },
-};
-use users::{
-    Groups,
-    Users,
-    UsersCache,
-};
-use crate::serverlib::fg::{
-    B2FPrompt,
-    B2F,
-};
-use super::datapath::{
-    glob_from_db_path,
-    GlobSeg,
+    users::{
+        Groups,
+        Users,
+        UsersCache,
+    },
 };
 
 pub struct RuleMatchUser {
@@ -144,7 +143,7 @@ pub struct PrincipalMeta {
     chain: Vec<PrincipalMetaProc>,
 }
 
-pub async fn scan_principal(log: &StandardLog, pid: i32) -> Result<PrincipalMeta, loga::Error> {
+pub async fn scan_principal(log: &Log, pid: i32) -> Result<PrincipalMeta, loga::Error> {
     // Get list of current systemd services for auth rule matching
     let mut service_pids = HashMap::new();
     {
@@ -171,7 +170,7 @@ pub async fn scan_principal(log: &StandardLog, pid: i32) -> Result<PrincipalMeta
             let log = log.fork(ea!(line = String::from_utf8_lossy(&line)));
             let mut splits = line.splitn(2, |x| *x == b'=');
             let Some((key, value)) = splits.next().zip(splits.next()) else {
-                log.log_err(StandardFlag::Warning, loga::err("Non KV line in systemd service PID list output"));
+                log.log_err(loga::WARN, loga::err("Non KV line in systemd service PID list output"));
                 continue;
             };
             match key {
@@ -179,10 +178,7 @@ pub async fn scan_principal(log: &StandardLog, pid: i32) -> Result<PrincipalMeta
                     let pid0 = match i32::from_str_radix(&String::from_utf8_lossy(&value), 10) {
                         Ok(x) => x,
                         Err(e) => {
-                            log.log_err(
-                                StandardFlag::Warning,
-                                e.context("Found unparsable PID in systemd service PID list"),
-                            );
+                            log.log_err(loga::WARN, e.context("Found unparsable PID in systemd service PID list"));
                             continue;
                         },
                     };
@@ -190,7 +186,7 @@ pub async fn scan_principal(log: &StandardLog, pid: i32) -> Result<PrincipalMeta
                 },
                 b"ID" => name = Some(String::from_utf8_lossy(&value).to_string()),
                 _ => {
-                    log.log(StandardFlag::Warning, "Got invalid line in systemd service PID list");
+                    log.log(loga::WARN, "Got invalid line in systemd service PID list");
                     continue;
                 },
             }
@@ -217,10 +213,7 @@ pub async fn scan_principal(log: &StandardLog, pid: i32) -> Result<PrincipalMeta
                     parent_pid = match i32::from_str_radix(String::from_utf8_lossy(&value).trim(), 10) {
                         Ok(pid) => Some(pid),
                         Err(e) => {
-                            log.log_err(
-                                StandardFlag::Warning,
-                                e.context("Got invalid ppid from proc tree status output"),
-                            );
+                            log.log_err(loga::WARN, e.context("Got invalid ppid from proc tree status output"));
                             continue;
                         },
                     };
@@ -235,7 +228,7 @@ pub async fn scan_principal(log: &StandardLog, pid: i32) -> Result<PrincipalMeta
                                 Ok(value) => Some(value),
                                 Err(e) => {
                                     log.log_err(
-                                        StandardFlag::Warning,
+                                        loga::WARN,
                                         e.context("Got invalid uid from proc tree status output"),
                                     );
                                     continue;
@@ -255,7 +248,7 @@ pub async fn scan_principal(log: &StandardLog, pid: i32) -> Result<PrincipalMeta
                                 Ok(value) => Some(value),
                                 Err(e) => {
                                     log.log_err(
-                                        StandardFlag::Warning,
+                                        loga::WARN,
                                         e.context("Got invalid uid from proc tree status output"),
                                     );
                                     continue;
@@ -298,7 +291,7 @@ pub async fn scan_principal(log: &StandardLog, pid: i32) -> Result<PrincipalMeta
         }.await {
             Ok(x) => x,
             Err(e) => {
-                log.log_err(StandardFlag::Warning, e.context("Unable to read proc exe link"));
+                log.log_err(loga::WARN, e.context("Unable to read proc exe link"));
                 None
             },
         };
@@ -354,7 +347,7 @@ pub async fn permit(
                 for rule in &tail.rules {
                     let mut matched = true;
                     if let Some(match_binary) = &rule.match_binary {
-                        let submatch = bb!{
+                        let submatch = shed!{
                             'done_match _;
                             for proc in &principal.chain {
                                 if proc.binary.as_ref() == Some(&match_binary.path) {
@@ -369,7 +362,7 @@ pub async fn permit(
                         matched = matched && submatch;
                     }
                     if let Some(match_systemd) = &rule.match_systemd {
-                        let submatch = bb!{
+                        let submatch = shed!{
                             'done_match _;
                             for proc in &principal.chain {
                                 if proc.systemd.as_ref() == Some(match_systemd) {
@@ -381,10 +374,10 @@ pub async fn permit(
                         matched = matched && submatch;
                     }
                     if let Some(match_user) = &rule.match_user {
-                        let submatch = bb!{
+                        let submatch = shed!{
                             'done_match _;
                             for proc in &principal.chain {
-                                bb!{
+                                shed!{
                                     if let Some(match_user_id) = &match_user.user_id {
                                         if proc.uid.as_ref() != Some(match_user_id) {
                                             break;
@@ -397,7 +390,6 @@ pub async fn permit(
                                     }
                                     break 'done_match true;
                                 }
-
                                 if !match_user.walk_ancestors {
                                     matched = false;
                                     break;

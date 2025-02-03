@@ -1,136 +1,127 @@
 #![feature(int_roundings)]
-
-use std::{
-    cell::RefCell,
-    collections::{
-        HashMap,
-        HashSet,
-    },
-    env,
-    io::Cursor,
-    path::{
-        PathBuf,
-    },
-    str::FromStr,
-    sync::{
-        Arc,
-        Mutex,
-    },
-    time::Duration,
-};
-use aargvark::{
-    vark,
-    Aargvark,
-    AargvarkJson,
-};
-use chrono::Utc;
-use gtk4::{
-    glib::LogLevels,
-    prelude::ApplicationExtManual,
-};
-use libc::{
-    c_void,
-    mlockall,
-    MCL_CURRENT,
-    MCL_FUTURE,
-    MCL_ONFAULT,
-};
-use loga::{
-    ea,
-    fatal,
-    DebugDisplay,
-    ErrContext,
-    ResultContext,
-    StandardFlag,
-    StandardLog,
-};
-use passworth::{
-    bb,
-    config,
-    generate,
-    ioutil::{
-        read_packet,
-        write_packet_bytes,
-    },
-    proto::{
-        C2S,
-        DEFAULT_SOCKET,
-        ENV_SOCKET,
-    },
-    IgnoreErr,
-};
-use sequoia_openpgp::{
-    cert::CertBuilder,
-    packet::{
-        key::{
-            SecretParts,
-            UnspecifiedRole,
+use {
+    crate::serverlib::{
+        datapath::{
+            specific_from_db_path,
+            specific_to_db_path,
         },
-        Key,
+        dbutil::open_privdb,
+        factor::build_factor_tree,
+        fg::{
+            FgState,
+            B2F,
+        },
+        permission::{
+            self,
+            build_rule_tree,
+            scan_principal,
+        },
     },
-    parse::{
-        stream::DecryptorBuilder,
-        Parse,
+    aargvark::{
+        traits_impls::AargvarkJson,
+        vark,
+        Aargvark,
     },
-    policy::StandardPolicy,
-    serialize::stream::{
-        Message,
-        Signer,
+    chrono::Utc,
+    flowcontrol::shed,
+    gtk4::{
+        glib::LogLevels,
+        prelude::ApplicationExtManual,
     },
-    Cert,
-};
-use serde_json::json;
-use serverlib::{
-    dbutil::tx,
-    fg::{
-        self,
-        B2FInitialize,
-        B2FUnlock,
+    libc::{
+        c_void,
+        mlockall,
+        MCL_CURRENT,
+        MCL_FUTURE,
+        MCL_ONFAULT,
     },
-    privdb,
-    pubdb,
-    factor::{
-        FactorTree,
-        FactorTreeVariant,
+    loga::{
+        conversion::ResultIgnore,
+        ea,
+        fatal,
+        DebugDisplay,
+        Log,
+        ResultContext,
     },
-};
-use taskmanager::TaskManager;
-use tokio::{
-    fs::{
-        create_dir_all,
-        remove_file,
+    passworth::{
+        config,
+        generate,
+        proto::{
+            self,
+            ipc_path,
+        },
     },
-    select,
-    sync::{
-        broadcast,
-        mpsc,
-        oneshot,
-        Notify,
+    sequoia_openpgp::{
+        cert::CertBuilder,
+        packet::{
+            key::{
+                SecretParts,
+                UnspecifiedRole,
+            },
+            Key,
+        },
+        parse::{
+            stream::DecryptorBuilder,
+            Parse,
+        },
+        policy::StandardPolicy,
+        serialize::stream::{
+            Message,
+            Signer,
+        },
+        Cert,
     },
-    task::spawn_blocking,
-    time::{
-        sleep_until,
-        Instant,
+    serde_json::json,
+    serverlib::{
+        dbutil::tx,
+        factor::{
+            FactorTree,
+            FactorTreeVariant,
+        },
+        fg::{
+            self,
+            B2FInitialize,
+            B2FUnlock,
+        },
+        privdb,
+        pubdb,
     },
-};
-use tokio_stream::wrappers::UnixListenerStream;
-use users::UsersCache;
-use crate::serverlib::{
-    datapath::{
-        specific_from_db_path,
-        specific_to_db_path,
+    std::{
+        cell::RefCell,
+        collections::{
+            HashMap,
+            HashSet,
+        },
+        env,
+        io::Cursor,
+        path::PathBuf,
+        str::FromStr,
+        sync::{
+            Arc,
+            Mutex,
+        },
+        time::Duration,
     },
-    dbutil::open_privdb,
-    factor::build_factor_tree,
-    fg::{
-        FgState,
-        B2F,
+    taskmanager::TaskManager,
+    tokio::{
+        fs::{
+            create_dir_all,
+        },
+        select,
+        spawn,
+        sync::{
+            broadcast,
+            mpsc,
+            oneshot,
+            Notify,
+        },
+        task::spawn_blocking,
+        time::{
+            sleep_until,
+            Instant,
+        },
     },
-    permission::{
-        self,
-        build_rule_tree,
-        scan_principal,
-    },
+    users::UsersCache,
 };
 
 pub mod serverlib;
@@ -138,29 +129,10 @@ pub mod serverlib;
 #[derive(Aargvark)]
 struct Args {
     config: AargvarkJson<config::latest::Config>,
+    /// Log excessive information.
     debug: Option<()>,
-}
-
-fn resp_error(message: &str) -> Result<Vec<u8>, loga::Error> {
-    return Ok(serde_json::to_vec(&json!({
-        "error": message
-    })).unwrap());
-}
-
-fn resp_unauthorized() -> Result<Vec<u8>, loga::Error> {
-    return resp_error("unauthorized");
-}
-
-fn resp_destructive() -> Result<Vec<u8>, loga::Error> {
-    return resp_error("destructive but force not specified");
-}
-
-fn resp_ok(v: serde_json::Value) -> Result<Vec<u8>, loga::Error> {
-    return Ok(serde_json::to_vec(&v).unwrap());
-}
-
-fn resp_ok_empty() -> Result<Vec<u8>, loga::Error> {
-    return Ok(serde_json::to_vec(&json!({ })).unwrap());
+    /// Validate config then exit.
+    validate: Option<()>,
 }
 
 fn bury(root: &mut Option<serde_json::Value>, path: &[String], value: serde_json::Value) {
@@ -175,7 +147,7 @@ fn bury(root: &mut Option<serde_json::Value>, path: &[String], value: serde_json
                 *at = serde_json::Value::Object(serde_json::Map::new());
             },
         }
-        let serde_json:: Value:: Object(o) = at else {
+        let serde_json::Value::Object(o) = at else {
             panic!();
         };
         let res = o.entry(seg).or_insert(serde_json::Value::Null);
@@ -192,13 +164,14 @@ async fn main2() -> Result<(), loga::Error> {
     }
     let tm = TaskManager::new();
     let args = vark::<Args>();
-    let log = {
-        let mut levels = vec![StandardFlag::Error, StandardFlag::Warning, StandardFlag::Info];
-        if args.debug.is_some() {
-            levels.push(StandardFlag::Debug);
-        }
-        StandardLog::new().with_flags(&levels)
-    };
+    if args.validate.is_some() {
+        return Ok(());
+    }
+    let log = Log::new_root(if args.debug.is_some() {
+        loga::DEBUG
+    } else {
+        loga::INFO
+    });
     for domain in [None, Some("Gtk"), Some("GLib"), Some("Gdk")] {
         gtk4::glib::log_set_handler(domain, LogLevels::all(), true, true, {
             let log = log.clone();
@@ -206,7 +179,7 @@ async fn main2() -> Result<(), loga::Error> {
                 log.log_with(
                     // Gdk et all log stuff as CRITICAL that's clearly not critical... ignore reported
                     // levels
-                    StandardFlag::Debug,
+                    loga::DEBUG,
                     text,
                     ea!(source = "gtk", level = level.dbg_str(), domain = domain.dbg_str()),
                 );
@@ -299,7 +272,6 @@ async fn main2() -> Result<(), loga::Error> {
                 _ = work =>(),
                 _ = tm.until_terminate() =>()
             };
-
             return Ok(());
         }
     });
@@ -321,10 +293,10 @@ async fn main2() -> Result<(), loga::Error> {
     }
 
     let data_path = match args.config.source {
-        aargvark::Source::Stdin => {
+        aargvark::traits_impls::Source::Stdin => {
             env::current_dir().context("Couldn't determine working directory")?
         },
-        aargvark::Source::File(f) => {
+        aargvark::traits_impls::Source::File(f) => {
             f.parent().unwrap().join(&config.data_path)
         },
     };
@@ -350,8 +322,7 @@ async fn main2() -> Result<(), loga::Error> {
     pubdb::migrate(
         &mut pubdbc,
     ).context_with("Error setting up pub database", ea!(path = pubdb_path.to_string_lossy()))?;
-
-    bb!{
+    shed!{
         'priv_init_done _;
         let mut prev_state = HashMap::new();
         for t in pubdb::factor_list(&mut pubdbc)? {
@@ -577,103 +548,99 @@ async fn main2() -> Result<(), loga::Error> {
 
     // Start command server
     let activity = Arc::new(Notify::new());
-    let sock_path = env::var_os(ENV_SOCKET).unwrap_or(DEFAULT_SOCKET.into());
-    match remove_file(&sock_path).await {
-        Ok(_) => (),
-        Err(e) => match e.kind() {
-            std::io::ErrorKind::NotFound => { },
-            _ => return Err(e.context("Error removing old socket")),
-        },
-    }
-    tm.critical_stream(
-        "Command processing",
-        UnixListenerStream::new(
-            tokio::net::UnixListener::bind(
-                &sock_path,
-            ).context_with(
-                "Error binding to socket",
-                ea!(path = String::from_utf8_lossy(sock_path.as_encoded_bytes())),
-            )?,
-        ),
-        {
-            async fn get_privdb(state: &State) -> Result<rusqlite::Connection, loga::Error> {
-                enum Invert {
-                    Ready {
-                        token: String,
-                    },
-                    Waiting {
-                        token_rx: broadcast::Receiver<String>,
-                    },
-                    Missing {
-                        token_tx: broadcast::Sender<String>,
-                    },
-                }
-
-                let privdbc = match {
-                    let mut token = state.token.lock().unwrap();
-                    match &token.token {
-                        Some(t) => Invert::Ready { token: t.clone() },
-                        None => {
-                            match &token.wait_sub {
-                                Some(s) => {
-                                    let token_rx = s.subscribe();
-                                    Invert::Waiting { token_rx: token_rx }
-                                },
-                                None => {
-                                    let (token_tx, _) = broadcast::channel(1);
-                                    token.wait_sub = Some(token_tx.clone());
-                                    Invert::Missing { token_tx: token_tx }
-                                },
-                            }
-                        },
-                    }
-                } {
-                    Invert::Ready { token } => {
-                        open_privdb(&state.privdb_path, &token)?
-                    },
-                    Invert::Waiting { mut token_rx } => {
-                        open_privdb(&state.privdb_path, &token_rx.recv().await?)?
-                    },
-                    Invert::Missing { token_tx } => {
-                        // Unlock
-                        let mut pubdbc = rusqlite::Connection::open(&state.pubdb_path).unwrap();
-                        let mut factor_state = HashMap::new();
-                        for t in pubdb::factor_list(&mut pubdbc)? {
-                            factor_state.insert(t.id, t.state);
-                        }
-                        let (fg_tx, fg_rx) = oneshot::channel();
-                        state.fg_tx.send(B2F::Unlock(B2FUnlock {
-                            privdb_path: state.privdb_path.clone(),
-                            root_factor: state.root_factor.clone(),
-                            state: factor_state,
-                        }, fg_tx)).await.ignore();
-                        let res =
-                            fg_rx.await?.context("Error during fg unlock")?.context("User closed unlock window")?;
-
-                        // Update shared token + return
-                        let mut token = state.token.lock().unwrap();
-                        token.wait_sub = None;
-                        token.token = Some(res.root_token.clone());
-                        token_tx.send(res.root_token.clone()).ignore();
-                        res.privdbc
-                    },
-                };
-                return Ok(privdbc);
+    let mut ipc_server = proto::msg::Server::new(ipc_path()).await.map_err(loga::err)?;
+    tm.critical_task("Command processing", {
+        async fn get_privdb(state: &State) -> Result<rusqlite::Connection, loga::Error> {
+            enum Invert {
+                Ready {
+                    token: String,
+                },
+                Waiting {
+                    token_rx: broadcast::Receiver<String>,
+                },
+                Missing {
+                    token_tx: broadcast::Sender<String>,
+                },
             }
 
-            let log = log.clone();
-            let rules = rules.clone();
-            let state = state.clone();
-            let activity = activity.clone();
-            move |conn| {
+            let privdbc = match {
+                let mut token = state.token.lock().unwrap();
+                match &token.token {
+                    Some(t) => Invert::Ready { token: t.clone() },
+                    None => {
+                        match &token.wait_sub {
+                            Some(s) => {
+                                let token_rx = s.subscribe();
+                                Invert::Waiting { token_rx: token_rx }
+                            },
+                            None => {
+                                let (token_tx, _) = broadcast::channel(1);
+                                token.wait_sub = Some(token_tx.clone());
+                                Invert::Missing { token_tx: token_tx }
+                            },
+                        }
+                    },
+                }
+            } {
+                Invert::Ready { token } => {
+                    open_privdb(&state.privdb_path, &token)?
+                },
+                Invert::Waiting { mut token_rx } => {
+                    open_privdb(&state.privdb_path, &token_rx.recv().await?)?
+                },
+                Invert::Missing { token_tx } => {
+                    // Unlock
+                    let mut pubdbc = rusqlite::Connection::open(&state.pubdb_path).unwrap();
+                    let mut factor_state = HashMap::new();
+                    for t in pubdb::factor_list(&mut pubdbc)? {
+                        factor_state.insert(t.id, t.state);
+                    }
+                    let (fg_tx, fg_rx) = oneshot::channel();
+                    state.fg_tx.send(B2F::Unlock(B2FUnlock {
+                        privdb_path: state.privdb_path.clone(),
+                        root_factor: state.root_factor.clone(),
+                        state: factor_state,
+                    }, fg_tx)).await.ignore();
+                    let res = fg_rx.await?.context("Error during fg unlock")?.context("User closed unlock window")?;
+
+                    // Update shared token + return
+                    let mut token = state.token.lock().unwrap();
+                    token.wait_sub = None;
+                    token.token = Some(res.root_token.clone());
+                    token_tx.send(res.root_token.clone()).ignore();
+                    res.privdbc
+                },
+            };
+            return Ok(privdbc);
+        }
+
+        let tm = tm.clone();
+        let log = log.clone();
+        let rules = rules.clone();
+        let state = state.clone();
+        let activity = activity.clone();
+        async move {
+            loop {
+                let conn = select!{
+                    c = ipc_server.accept() => c,
+                    _ = tm.until_terminate() => {
+                        break;
+                    }
+                };
                 let log = log.clone();
                 let rules = rules.clone();
                 let state = state.clone();
                 let activity = activity.clone();
-                async move {
+                let mut conn = match conn.map_err(loga::err) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log.log_err(loga::DEBUG, e.context("Error receiving ipc connection"));
+                        break;
+                    },
+                };
+                spawn(async move {
                     match async {
-                        let mut conn = conn?;
-                        let peer = conn.peer_cred()?;
+                        let peer = conn.0.peer_cred()?;
                         let pid = peer.pid().context("OS didn't provide PID for peer")?;
                         let peer_meta = scan_principal(&log, pid).await?;
 
@@ -744,11 +711,16 @@ async fn main2() -> Result<(), loga::Error> {
                             };
 
                         // Process request
-                        while let Some(req) = read_packet::<C2S>(&mut conn).await {
-                            let resp = match async {
-                                let req = req?;
+                        while let Some(req) = conn.recv_req().await.map_err(loga::err)? {
+                            fn resp_unauthorized() -> Result<proto::msg::ServerResp, loga::Error> {
+                                return Err(loga::err("Unauthorized"));
+                            }
+
+                            let resp;
+                            match async {
+                                let resp;
                                 match req {
-                                    C2S::Unlock => {
+                                    proto::msg::ServerReq::Unlock(rr, _req) => {
                                         if !permission::permit(
                                             state.fg_tx.clone(),
                                             &rules,
@@ -761,9 +733,9 @@ async fn main2() -> Result<(), loga::Error> {
                                         }
                                         get_privdb(&state).await?;
                                         activity.notify_one();
-                                        return Ok(serde_json::to_vec(&serde_json::Value::Null).unwrap());
+                                        resp = rr(());
                                     },
-                                    C2S::Lock => {
+                                    proto::msg::ServerReq::Lock(rr, _req) => {
                                         if !permission::permit(
                                             state.fg_tx.clone(),
                                             &rules,
@@ -775,18 +747,18 @@ async fn main2() -> Result<(), loga::Error> {
                                             return resp_unauthorized();
                                         }
                                         state.token.lock().unwrap().token = None;
-                                        return Ok(serde_json::to_vec(&serde_json::Value::Null).unwrap());
+                                        resp = rr(());
                                     },
-                                    C2S::Get { paths, at } => {
-                                        if !permission::permit(state.fg_tx.clone(), &rules, &peer_meta, &paths)
+                                    proto::msg::ServerReq::Get(rr, req) => {
+                                        if !permission::permit(state.fg_tx.clone(), &rules, &peer_meta, &req.paths)
                                             .await?
                                             .read {
                                             return resp_unauthorized();
                                         }
                                         let tree = tx(get_privdb(&state).await?, move |txn| {
                                             let mut root = None;
-                                            for path in &paths {
-                                                let Some(data) = get(txn, path, at) ? else {
+                                            for path in &req.paths {
+                                                let Some(data) = get(txn, path, req.at)? else {
                                                     continue;
                                                 };
                                                 bury(&mut root, &path, data);
@@ -794,66 +766,72 @@ async fn main2() -> Result<(), loga::Error> {
                                             return Ok(root);
                                         }).await?;
                                         activity.notify_one();
-                                        return Ok(serde_json::to_vec(&tree).unwrap());
+                                        resp = rr(serde_json::to_value(&tree).unwrap());
                                     },
-                                    C2S::Set(pairs) => {
+                                    proto::msg::ServerReq::Set(rr, req) => {
                                         if !permission::permit(
                                             state.fg_tx.clone(),
                                             &rules,
                                             &peer_meta,
-                                            &pairs.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(),
+                                            &req.0.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(),
                                         )
                                             .await?
                                             .write {
                                             return resp_unauthorized();
                                         }
                                         tx(get_privdb(&state).await?, move |txn| {
-                                            set(txn, pairs.into_iter().map(|(k, v)| (k, Some(v))).collect())?;
+                                            set(txn, req.0.into_iter().map(|(k, v)| (k, Some(v))).collect())?;
                                             return Ok(());
                                         }).await?;
                                         activity.notify_one();
-                                        return Ok(serde_json::to_vec(&serde_json::Value::Null).unwrap());
+                                        resp = rr(());
                                     },
-                                    C2S::Move { from, to, overwrite } => {
+                                    proto::msg::ServerReq::Move(rr, req) => {
                                         if !permission::permit(
                                             state.fg_tx.clone(),
                                             &rules,
                                             &peer_meta,
-                                            &[from.clone(), to.clone()],
+                                            &[req.from.clone(), req.to.clone()],
                                         )
                                             .await?
                                             .write {
                                             return resp_unauthorized();
                                         }
-                                        let resp = tx(get_privdb(&state).await?, move |txn| {
-                                            if get(txn, &from, None)?.is_some() && !overwrite {
-                                                return resp_destructive();
+                                        tx(get_privdb(&state).await?, move |txn| {
+                                            if get(txn, &req.from, None)?.is_some() && !req.overwrite {
+                                                return Err(
+                                                    loga::err(
+                                                        "Attempt to move over existing value with overwrite off",
+                                                    ),
+                                                );
                                             }
-                                            let data = get(txn, &from, None)?;
-                                            set(txn, vec![(from, None), (to, data)])?;
-                                            return resp_ok_empty();
+                                            let data = get(txn, &req.from, None)?;
+                                            set(txn, vec![(req.from, None), (req.to, data)])?;
+                                            return Ok(());
                                         }).await?;
                                         activity.notify_one();
-                                        return Ok(resp);
+                                        resp = rr(());
                                     },
-                                    C2S::Generate { path, variant, overwrite } => {
+                                    proto::msg::ServerReq::Generate(rr, req) => {
                                         if !permission::permit(
                                             state.fg_tx.clone(),
                                             &rules,
                                             &peer_meta,
-                                            &[path.clone()],
+                                            &[req.path.clone()],
                                         )
                                             .await?
                                             .write {
                                             return resp_unauthorized();
                                         }
-                                        let resp = tx(get_privdb(&state).await?, move |txn| {
-                                            if get(txn, &path, None)?.is_some() && !overwrite {
-                                                return resp_destructive();
+                                        let db_resp = tx(get_privdb(&state).await?, move |txn| {
+                                            if get(txn, &req.path, None)?.is_some() && !req.overwrite {
+                                                return Err(
+                                                    loga::err("Destructive command but flag to allow not specified"),
+                                                );
                                             }
                                             let res_data;
                                             let data;
-                                            match variant {
+                                            match req.variant {
                                                 passworth::proto::C2SGenerateVariant::Bytes { length } => {
                                                     data =
                                                         serde_json::to_value(&generate::gen_bytes(length)).unwrap();
@@ -935,194 +913,189 @@ async fn main2() -> Result<(), loga::Error> {
                                                     }
                                                 },
                                             };
-                                            set(txn, vec![(path, Some(data))])?;
-                                            return resp_ok(serde_json::Value::String(res_data));
+                                            set(txn, vec![(req.path, Some(data))])?;
+                                            return Ok(res_data);
                                         }).await?;
                                         activity.notify_one();
-                                        return Ok(resp);
+                                        resp = rr(db_resp);
                                     },
-                                    C2S::PgpSign { key: key_path, data } => {
+                                    proto::msg::ServerReq::PgpSign(rr, req) => {
                                         if !permission::permit(
                                             state.fg_tx.clone(),
                                             &rules,
                                             &peer_meta,
-                                            &[key_path.clone()],
+                                            &[req.key.clone()],
                                         )
                                             .await?
                                             .derive {
                                             return resp_unauthorized();
                                         }
-                                        let resp = tx(get_privdb(&state).await?, move |txn| {
-                                            return Ok(get(txn, &key_path, None)?);
+                                        let db_key = tx(get_privdb(&state).await?, move |txn| {
+                                            return Ok(get(txn, &req.key, None)?);
                                         }).await?;
-                                        let Some(serde_json::Value::String(key)) = resp else {
-                                            return resp_error("No value at path or value is not a string");
+                                        let Some(serde_json::Value::String(key)) = db_key else {
+                                            return Err(loga::err("No value at path or value is not a string"));
                                         };
-                                        match async {
-                                            let mut signed = vec![];
-                                            let mut signer =
-                                                Signer::with_template(
-                                                    Message::new(&mut signed),
-                                                    Cert::from_str(&key)
-                                                        .map_err(|e| e.to_string())?
-                                                        .keys()
-                                                        .secret()
-                                                        .with_policy(&StandardPolicy::new(), None)
-                                                        .supported()
-                                                        .for_signing()
-                                                        .nth(0)
-                                                        .unwrap()
-                                                        .key()
-                                                        .clone()
-                                                        .into_keypair()
-                                                        .map_err(|e| e.to_string())?,
-                                                    sequoia_openpgp::packet::signature::SignatureBuilder::new(
-                                                        sequoia_openpgp::types::SignatureType::Text,
-                                                    ),
-                                                )
-                                                    .detached()
-                                                    .build()
-                                                    .map_err(|e| e.to_string())?;
-                                            std::io::copy(
-                                                &mut Cursor::new(data),
-                                                &mut signer,
-                                            ).map_err(|e| e.to_string())?;
-                                            signer.finalize().map_err(|e| e.to_string())?;
-                                            activity.notify_one();
-                                            return Ok(resp_ok(serde_json::to_value(&signed).unwrap())) as
-                                                Result<_, String>;
-                                        }.await {
-                                            Ok(r) => return r,
-                                            Err(e) => return resp_error(&e),
-                                        }
+                                        let mut signed = vec![];
+                                        let mut signer =
+                                            Signer::with_template(
+                                                Message::new(&mut signed),
+                                                Cert::from_str(&key)
+                                                    .map_err(loga::err)
+                                                    .context("Error loading data at path as pgp cert")?
+                                                    .keys()
+                                                    .secret()
+                                                    .with_policy(&StandardPolicy::new(), None)
+                                                    .supported()
+                                                    .for_signing()
+                                                    .nth(0)
+                                                    .unwrap()
+                                                    .key()
+                                                    .clone()
+                                                    .into_keypair()
+                                                    .map_err(loga::err)
+                                                    .context("Error converting pgp cert at path into pgp keypair")?,
+                                                sequoia_openpgp::packet::signature::SignatureBuilder::new(
+                                                    sequoia_openpgp::types::SignatureType::Text,
+                                                ),
+                                            )
+                                                .detached()
+                                                .build()
+                                                .map_err(loga::err)
+                                                .context("Error building signer")?;
+                                        std::io::copy(
+                                            &mut Cursor::new(req.data),
+                                            &mut signer,
+                                        ).context("Error signing data")?;
+                                        signer.finalize().map_err(loga::err).context("Error finishing signature")?;
+                                        activity.notify_one();
+                                        resp = rr(signed);
                                     },
-                                    C2S::PgpDecrypt { key: key_path, data } => {
+                                    proto::msg::ServerReq::PgpDecrypt(rr, req) => {
                                         if !permission::permit(
                                             state.fg_tx.clone(),
                                             &rules,
                                             &peer_meta,
-                                            &[key_path.clone()],
+                                            &[req.key.clone()],
                                         )
                                             .await?
                                             .derive {
                                             return resp_unauthorized();
                                         }
-                                        let resp = tx(get_privdb(&state).await?, move |txn| {
-                                            return Ok(get(txn, &key_path, None)?);
+                                        let db_key = tx(get_privdb(&state).await?, move |txn| {
+                                            return Ok(get(txn, &req.key, None)?);
                                         }).await?;
-                                        let Some(serde_json::Value::String(key)) = resp else {
-                                            return resp_error("No value at path or value is not a string");
+                                        let Some(serde_json::Value::String(key)) = db_key else {
+                                            return Err(loga::err("No value at path or value is not a string"));
                                         };
-                                        match async {
-                                            let mut decrypted = vec![];
+                                        let mut decrypted = vec![];
 
-                                            struct Helper(Cert);
+                                        struct Helper(Cert);
 
-                                            impl Helper {
-                                                fn secret_key(&self) -> Key<SecretParts, UnspecifiedRole> {
-                                                    return self
-                                                        .0
-                                                        .keys()
-                                                        .secret()
-                                                        .with_policy(&StandardPolicy::new(), None)
-                                                        .supported()
-                                                        .for_storage_encryption()
-                                                        .nth(0)
-                                                        .unwrap()
-                                                        .key()
-                                                        .clone();
-                                                }
+                                        impl Helper {
+                                            fn secret_key(&self) -> Key<SecretParts, UnspecifiedRole> {
+                                                return self
+                                                    .0
+                                                    .keys()
+                                                    .secret()
+                                                    .with_policy(&StandardPolicy::new(), None)
+                                                    .supported()
+                                                    .for_storage_encryption()
+                                                    .nth(0)
+                                                    .unwrap()
+                                                    .key()
+                                                    .clone();
                                             }
+                                        }
 
-                                            impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
-                                                fn get_certs(
-                                                    &mut self,
-                                                    ids: &[sequoia_openpgp::KeyHandle],
-                                                ) -> sequoia_openpgp::Result<Vec<Cert>> {
-                                                    let own_id = self.secret_key().key_handle();
-                                                    for id in ids {
-                                                        if id.aliases(&own_id) {
-                                                            return Ok(vec![self.0.clone()]);
-                                                        }
+                                        impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
+                                            fn get_certs(
+                                                &mut self,
+                                                ids: &[sequoia_openpgp::KeyHandle],
+                                            ) -> sequoia_openpgp::Result<Vec<Cert>> {
+                                                let own_id = self.secret_key().key_handle();
+                                                for id in ids {
+                                                    if id.aliases(&own_id) {
+                                                        return Ok(vec![self.0.clone()]);
                                                     }
-                                                    return Ok(vec![]);
                                                 }
-
-                                                fn check(
-                                                    &mut self,
-                                                    _structure: sequoia_openpgp::parse::stream::MessageStructure,
-                                                ) -> sequoia_openpgp::Result<()> {
-                                                    return Ok(());
-                                                }
+                                                return Ok(vec![]);
                                             }
 
-                                            impl sequoia_openpgp::parse::stream::DecryptionHelper for Helper {
-                                                fn decrypt<
-                                                    D,
-                                                >(
-                                                    &mut self,
-                                                    pkesks: &[sequoia_openpgp::packet::PKESK],
-                                                    _skesks: &[sequoia_openpgp::packet::SKESK],
-                                                    sym_algo: Option<sequoia_openpgp::types::SymmetricAlgorithm>,
-                                                    mut decrypt: D,
-                                                ) -> sequoia_openpgp::Result<Option<sequoia_openpgp::Fingerprint>>
-                                                where
-                                                    D:
-                                                        FnMut(
-                                                            sequoia_openpgp::types::SymmetricAlgorithm,
-                                                            &sequoia_openpgp::crypto::SessionKey,
-                                                        ) -> bool {
-                                                    let mut keypair = self.secret_key().into_keypair()?;
-                                                    for pkesk in pkesks {
-                                                        let Some(
-                                                            (sym_algo, sk)
-                                                        ) = pkesk.decrypt(&mut keypair, sym_algo) else {
+                                            fn check(
+                                                &mut self,
+                                                _structure: sequoia_openpgp::parse::stream::MessageStructure,
+                                            ) -> sequoia_openpgp::Result<()> {
+                                                return Ok(());
+                                            }
+                                        }
+
+                                        impl sequoia_openpgp::parse::stream::DecryptionHelper for Helper {
+                                            fn decrypt<
+                                                D,
+                                            >(
+                                                &mut self,
+                                                pkesks: &[sequoia_openpgp::packet::PKESK],
+                                                _skesks: &[sequoia_openpgp::packet::SKESK],
+                                                sym_algo: Option<sequoia_openpgp::types::SymmetricAlgorithm>,
+                                                mut decrypt: D,
+                                            ) -> sequoia_openpgp::Result<Option<sequoia_openpgp::Fingerprint>>
+                                            where
+                                                D:
+                                                    FnMut(
+                                                        sequoia_openpgp::types::SymmetricAlgorithm,
+                                                        &sequoia_openpgp::crypto::SessionKey,
+                                                    ) -> bool {
+                                                let mut keypair = self.secret_key().into_keypair()?;
+                                                for pkesk in pkesks {
+                                                    let Some((sym_algo, sk)) =
+                                                        pkesk.decrypt(&mut keypair, sym_algo) else {
                                                             continue;
                                                         };
-                                                        if decrypt(sym_algo, &sk) {
-                                                            return Ok(Some(keypair.public().fingerprint()));
-                                                        }
+                                                    if decrypt(sym_algo, &sk) {
+                                                        return Ok(Some(keypair.public().fingerprint()));
                                                     }
-                                                    return Ok(None);
                                                 }
+                                                return Ok(None);
                                             }
-
-                                            let policy = StandardPolicy::new();
-                                            let mut decryptor =
-                                                DecryptorBuilder::from_bytes(&data)
-                                                    .map_err(|e| e.to_string())?
-                                                    .with_policy(
-                                                        &policy,
-                                                        None,
-                                                        Helper(Cert::from_str(&key).map_err(|e| e.to_string())?),
-                                                    )
-                                                    .map_err(|e| e.to_string())?;
-                                            std::io::copy(
-                                                &mut decryptor,
-                                                &mut Cursor::new(&mut decrypted),
-                                            ).map_err(|e| e.to_string())?;
-                                            activity.notify_one();
-                                            return Ok(resp_ok(serde_json::to_value(&decrypted).unwrap())) as
-                                                Result<_, String>;
-                                        }.await {
-                                            Ok(r) => return r,
-                                            Err(e) => return resp_error(&e),
                                         }
+
+                                        let policy = StandardPolicy::new();
+                                        let mut decryptor =
+                                            DecryptorBuilder::from_bytes(&req.data)
+                                                .map_err(loga::err)
+                                                .context("Error creating decryptor from data to decrypt")?
+                                                .with_policy(
+                                                    &policy,
+                                                    None,
+                                                    Helper(
+                                                        Cert::from_str(&key)
+                                                            .map_err(loga::err)
+                                                            .context("Error creating pgp cert from data at path")?,
+                                                    ),
+                                                )
+                                                .map_err(loga::err)
+                                                .context("Error matching cert to data to decrypt")?;
+                                        std::io::copy(&mut decryptor, &mut Cursor::new(&mut decrypted))
+                                            .map_err(loga::err)
+                                            .context("Error decrypting data")?;
+                                        activity.notify_one();
+                                        resp = rr(decrypted);
                                     },
-                                    C2S::GetRevisions { paths, at } => {
-                                        if !permission::permit(state.fg_tx.clone(), &rules, &peer_meta, &paths)
+                                    proto::msg::ServerReq::GetRevisions(rr, req) => {
+                                        if !permission::permit(state.fg_tx.clone(), &rules, &peer_meta, &req.paths)
                                             .await?
                                             .read {
                                             return resp_unauthorized();
                                         }
                                         let mut privdbc = get_privdb(&state).await?;
-                                        let resp = spawn_blocking(move || {
+                                        let db_resp = spawn_blocking(move || {
                                             let mut root = Some(serde_json::Value::Null);
-                                            for path in paths {
+                                            for path in req.paths {
                                                 for row in privdb::values_get(
                                                     &mut privdbc,
                                                     &specific_to_db_path(&path),
-                                                    at.map(|x| x as i64).unwrap_or(i64::MAX),
+                                                    req.at.map(|x| x as i64).unwrap_or(i64::MAX),
                                                 )? {
                                                     if row.data.is_none() {
                                                         continue;
@@ -1133,51 +1106,52 @@ async fn main2() -> Result<(), loga::Error> {
                                                     }));
                                                 }
                                             }
-                                            return resp_ok(root.unwrap());
+                                            return Ok(root.unwrap()) as Result<_, loga::Error>;
                                         }).await??;
                                         activity.notify_one();
-                                        return Ok(resp);
+                                        resp = rr(db_resp);
                                     },
-                                    C2S::Revert { paths, at } => {
-                                        if !permission::permit(state.fg_tx.clone(), &rules, &peer_meta, &paths)
+                                    proto::msg::ServerReq::Revert(rr, req) => {
+                                        if !permission::permit(state.fg_tx.clone(), &rules, &peer_meta, &req.paths)
                                             .await?
                                             .write {
                                             return resp_unauthorized();
                                         }
                                         tx(get_privdb(&state).await?, move |txn| {
-                                            for path in paths {
-                                                let data = get(txn, &path, Some(at))?;
+                                            for path in req.paths {
+                                                let data = get(txn, &path, Some(req.at))?;
                                                 set(txn, vec![(path, data)])?;
                                             }
                                             return Ok(()) as Result<_, loga::Error>;
                                         }).await?;
                                         activity.notify_one();
-                                        return resp_ok_empty();
+                                        resp = rr(());
                                     },
-                                };
+                                }
+                                return Ok(resp);
                             }.await {
-                                Ok(r) => r,
+                                Ok(r) => {
+                                    resp = r;
+                                },
                                 Err(e) => {
-                                    log.log_err(StandardFlag::Warning, e.context("Error processing request"));
-                                    serde_json::to_vec(&json!({
-                                        "error": "Encountered error processing request"
-                                    })).unwrap()
+                                    log.log_err(loga::WARN, e.context("Error processing request"));
+                                    resp = proto::msg::ServerResp::err("Encountered error processing request");
                                 },
                             };
-                            write_packet_bytes(&mut conn, resp).await?;
+                            conn.send_resp(resp).await.map_err(loga::err)?;
                         }
                         return Ok(()) as Result<_, loga::Error>;
                     }.await {
-                        Ok(_) => return Ok(()),
+                        Ok(_) => { },
                         Err(e) => {
-                            log.log_err(StandardFlag::Warning, e.context("Error during connection setup"));
-                            return Ok(());
+                            log.log_err(loga::WARN, e.context("Error during connection setup"));
                         },
                     }
-                }
+                });
             }
-        },
-    );
+            return Ok(());
+        }
+    });
 
     // Timeout-locks
     tm.critical_task("Timeouts", {
@@ -1198,7 +1172,7 @@ async fn main2() -> Result<(), loga::Error> {
                         sleep_until(next.take().unwrap()).await
                     },
                     if next.is_some() => {
-                        log.log(StandardFlag::Debug, "Activity timeout, locking");
+                        log.log(loga::DEBUG, "Activity timeout, locking");
                         state.token.lock().unwrap().token = None;
                     }
                 }
@@ -1207,7 +1181,7 @@ async fn main2() -> Result<(), loga::Error> {
     });
 
     // Start bg tasks (timeouts mainly) Wait forever
-    tm.join(&log, StandardFlag::Info).await?;
+    tm.join(&log).await?;
     return Ok(());
 }
 

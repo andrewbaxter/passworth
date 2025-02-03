@@ -1,14 +1,15 @@
-use std::{
-    path::PathBuf,
-};
-use good_ormning_runtime::sqlite::GoodOrmningCustomString;
-use serde::{
-    Deserialize,
-    Serialize,
+use {
+    good_ormning_runtime::sqlite::GoodOrmningCustomString,
+    schemars::JsonSchema,
+    serde::{
+        Deserialize,
+        Serialize,
+    },
+    std::path::PathBuf,
 };
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ConfigCredSmartcard {
     pub fingerprint: String,
     /// If pinentry, this must be null and will use the entered pin.  If not pinentry,
@@ -17,8 +18,8 @@ pub struct ConfigCredSmartcard {
     pub pin: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ConfigCredSmartcards {
     /// If true, use the pin preconfigured for each smartcard instead of showing
     /// pinentry.
@@ -28,8 +29,8 @@ pub struct ConfigCredSmartcards {
     pub smartcards: Vec<ConfigCredSmartcard>,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConfigAuthFactorVariant {
     And(Vec<String>),
     Or(Vec<String>),
@@ -38,38 +39,38 @@ pub enum ConfigAuthFactorVariant {
     RecoveryCode,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ConfigAuthFactor {
     pub id: String,
     pub description: String,
     pub variant: ConfigAuthFactorVariant,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ConfigAuthMethod {
     pub description: String,
     pub root_factor: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ConfigPrompt {
     pub description: String,
     #[serde(default)]
     pub remember_seconds: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(untagged)]
 pub enum UserGroupId {
     Name(String),
     Id(u32),
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MatchUser {
     #[serde(default)]
     pub user: Option<UserGroupId>,
@@ -79,16 +80,16 @@ pub struct MatchUser {
     pub walk_ancestors: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MatchBinary {
     pub path: PathBuf,
     #[serde(default)]
     pub walk_ancestors: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ConfigPermissionRule {
     /// Paths to which this rule applies. To apply to everything, use the empty path
     /// `""`. In the format `/seg/seg/.../seg` - no initial slash. Segments are
@@ -123,8 +124,8 @@ pub struct ConfigPermissionRule {
     pub prompt: Option<ConfigPrompt>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Config {
     /// A directory where this will store sqlite databases.
     pub data_path: PathBuf,
@@ -140,7 +141,7 @@ pub struct Config {
 }
 
 impl GoodOrmningCustomString<Config> for Config {
-    fn to_sql<'a>(value: &'a Config) -> std::borrow::Cow<'a, str> {
+    fn to_sql<'a>(value: &'a Config) -> String {
         return serde_json::to_string(&value).unwrap().into();
     }
 

@@ -1,5 +1,5 @@
-use std::any::Any;
-use loga::ErrContext;
+use {std::any::Any,
+loga::ErrContext};
 
 pub enum UiErr {
     Internal(loga::Error),
