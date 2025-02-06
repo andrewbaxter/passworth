@@ -79,6 +79,66 @@ enum GenerateVariant {
 }
 
 #[derive(Aargvark)]
+struct GetCommand {
+    paths: Vec<PassworthPath>,
+    /// Optionally retrieve data from a previous revision.
+    at: Option<i64>,
+    /// Extract primitive value from json - i.e. unquote strings, do nothing for
+    /// numbers and bools. Errors if not primitive.
+    extract: Option<()>,
+}
+
+#[derive(Aargvark)]
+struct MoveCommand {
+    from: PassworthPath,
+    to: PassworthPath,
+    /// If force is off and the destination path already has data, this will error.
+    /// Setting force will override the data.
+    overwrite: Option<()>,
+}
+
+#[derive(Aargvark)]
+struct GenerateCommand {
+    /// Where to store the generated data.
+    path: PassworthPath,
+    /// What sort of data to generate.
+    variant: GenerateVariant,
+    /// Write the generated data even if data already exists at the path (overwrites
+    /// path).
+    overwrite: Option<()>,
+}
+
+#[derive(Aargvark)]
+struct PgpSignCommand {
+    /// Path of key (in ascii-armor format) to sign with
+    key: PassworthPath,
+    /// Data to sign
+    data: AargvarkFile,
+}
+
+#[derive(Aargvark)]
+struct PgpDecryptCommand {
+    /// Path of key (in ascii-armor format) to decrypt with
+    key: PassworthPath,
+    /// Data to decrypt
+    data: AargvarkFile,
+}
+
+#[derive(Aargvark)]
+struct ListRevisionsCommand {
+    paths: Vec<PassworthPath>,
+    /// Retrieve the revisions immediately before a previous revision.
+    at: Option<i64>,
+}
+
+#[derive(Aargvark)]
+struct RevertCommand {
+    paths: Vec<PassworthPath>,
+    at: i64,
+}
+
+#[derive(Aargvark)]
+#[vark(break_help)]
 enum Command {
     /// Trigger unlock and wait for it to complete.
     Unlock,
@@ -86,59 +146,24 @@ enum Command {
     Lock,
     /// Unlock if locked, and retrieve the data at the following paths (merged into one
     /// JSON tree).
-    Get {
-        paths: Vec<PassworthPath>,
-        /// Optionally retrieve data from a previous revision.
-        at: Option<i64>,
-    },
+    Get(GetCommand),
     /// Unlock if locked, and replace the data at the following paths.
     Set(Vec<PassworthSet>),
     /// Move data from one location to another.
-    Move {
-        from: PassworthPath,
-        to: PassworthPath,
-        /// If force is off and the destination path already has data, this will error.
-        /// Setting force will override the data.
-        overwrite: Option<()>,
-    },
+    Move(MoveCommand),
     /// Generate a secret and store it at the specified location - for asymmetric keys
     /// returns the public portion.
-    Generate {
-        /// Where to store the generated data.
-        path: PassworthPath,
-        /// What sort of data to generate.
-        variant: GenerateVariant,
-        /// Write the generated data even if data already exists at the path (overwrites
-        /// path).
-        overwrite: Option<()>,
-    },
+    Generate(GenerateCommand),
     /// Produce a pgp signature on data
-    PgpSign {
-        /// Path of key (in ascii-armor format) to sign with
-        key: PassworthPath,
-        /// Data to sign
-        data: AargvarkFile,
-    },
+    PgpSign(PgpSignCommand),
     /// Do pgp decryption on data
-    PgpDecrypt {
-        /// Path of key (in ascii-armor format) to decrypt with
-        key: PassworthPath,
-        /// Data to decrypt
-        data: AargvarkFile,
-    },
+    PgpDecrypt(PgpDecryptCommand),
     /// List revision ids and timestamps for any values under the specified paths
     /// (merged into one JSON tree).
-    ListRevisions {
-        paths: Vec<PassworthPath>,
-        /// Retrieve the revisions immediately before a previous revision.
-        at: Option<i64>,
-    },
+    ListRevisions(ListRevisionsCommand),
     /// Restore data from a previous revision. Note that this preserves history, so you
     /// can restore to before the restore to undo a restore operation.
-    Revert {
-        paths: Vec<PassworthPath>,
-        at: i64,
-    },
+    Revert(RevertCommand),
     /// Listen for smartcards (usb and nfc) and show their fingerprints as can be used
     /// in config
     ScanCards,
@@ -159,27 +184,54 @@ async fn main2() -> Result<(), loga::Error> {
         Command::Lock => {
             req(proto::ReqLock).await?;
         },
-        Command::Get { paths, at } => {
+        Command::Get(args) => {
             let res = req(proto::ReqGet {
-                paths: paths.into_iter().map(|x| x.0).collect(),
-                at: at,
+                paths: args.paths.into_iter().map(|x| x.0).collect(),
+                at: args.at,
             }).await?;
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            if args.extract.is_some() {
+                match &res {
+                    serde_json::Value::Null => {
+                        print!("null");
+                    },
+                    serde_json::Value::Bool(v) => {
+                        print!("{}", v);
+                    },
+                    serde_json::Value::Number(number) => {
+                        print!("{}", number);
+                    },
+                    serde_json::Value::String(v) => {
+                        print!("{}", v);
+                    },
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                        return Err(
+                            loga::err(
+                                format!(
+                                    "Got non-primitive value, can't extract: {}",
+                                    serde_json::to_string(&res).unwrap()
+                                ),
+                            ),
+                        );
+                    },
+                }
+            } else {
+                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            }
         },
         Command::Set(pairs) => {
             req(proto::ReqSet(pairs.into_iter().map(|p| p.0).collect())).await?;
         },
-        Command::Move { from, to, overwrite } => {
+        Command::Move(args) => {
             req(proto::ReqMove {
-                from: from.0,
-                to: to.0,
-                overwrite: overwrite.is_some(),
+                from: args.from.0,
+                to: args.to.0,
+                overwrite: args.overwrite.is_some(),
             }).await?;
         },
-        Command::Generate { path, variant, overwrite } => {
+        Command::Generate(args) => {
             let res = req(proto::ReqGenerate {
-                path: path.0,
-                variant: match variant {
+                path: args.path.0,
+                variant: match args.variant {
                     GenerateVariant::Bytes { length } => C2SGenerateVariant::Bytes { length: length },
                     GenerateVariant::SafeAlphanumeric { length } => C2SGenerateVariant::SafeAlphanumeric {
                         length: length,
@@ -190,37 +242,37 @@ async fn main2() -> Result<(), loga::Error> {
                     },
                     GenerateVariant::Pgp => C2SGenerateVariant::Pgp,
                 },
-                overwrite: overwrite.is_some(),
+                overwrite: args.overwrite.is_some(),
             }).await?;
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
-        Command::PgpSign { key, data } => {
+        Command::PgpSign(args) => {
             let res = req(proto::ReqPgpSign {
-                key: key.0,
-                data: data.value,
+                key: args.key.0,
+                data: args.data.value,
             }).await?;
             std::io::stdout().write_all(&res).unwrap();
             std::io::stdout().flush().unwrap();
         },
-        Command::PgpDecrypt { key, data } => {
+        Command::PgpDecrypt(args) => {
             let res = req(proto::ReqPgpDecrypt {
-                key: key.0,
-                data: data.value,
+                key: args.key.0,
+                data: args.data.value,
             }).await?;
             std::io::stdout().write_all(&res).unwrap();
             std::io::stdout().flush().unwrap();
         },
-        Command::ListRevisions { paths, at } => {
+        Command::ListRevisions(args) => {
             let res = req(proto::ReqGetRevisions {
-                paths: paths.into_iter().map(|x| x.0).collect(),
-                at: at,
+                paths: args.paths.into_iter().map(|x| x.0).collect(),
+                at: args.at,
             }).await?;
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
-        Command::Revert { paths, at } => {
+        Command::Revert(args) => {
             req(proto::ReqRevert {
-                paths: paths.into_iter().map(|x| x.0).collect(),
-                at: at,
+                paths: args.paths.into_iter().map(|x| x.0).collect(),
+                at: args.at,
             }).await?;
         },
         Command::ScanCards => {

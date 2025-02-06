@@ -91,10 +91,10 @@ pub struct MatchBinary {
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ConfigPermissionRule {
-    /// Paths to which this rule applies. To apply to everything, use the empty path
-    /// `""`. In the format `/seg/seg/.../seg` - no initial slash. Segments are
-    /// literals or `*`, and `*` and `/` can be escaped with a backslash. `*` is a
-    /// wildcard, and must appear as a whole segment.
+    /// Paths to which this rule applies. In the format `/seg/seg/.../seg`. To apply to
+    /// everything, use the empty path `""` - no initial slash. Segments are literals
+    /// or `*`. `*` is a wildcard, and must appear as a whole segment. `*` and `/` can
+    /// be escaped with a backslash.
     pub paths: Vec<String>,
     /// Match requesting processes against a systemd service name (via service pid).
     #[serde(default)]

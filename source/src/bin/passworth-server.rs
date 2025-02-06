@@ -1,4 +1,5 @@
 #![feature(int_roundings)]
+
 use {
     crate::serverlib::{
         datapath::{
@@ -30,10 +31,6 @@ use {
     },
     libc::{
         c_void,
-        mlockall,
-        MCL_CURRENT,
-        MCL_FUTURE,
-        MCL_ONFAULT,
     },
     loga::{
         conversion::ResultIgnore,
@@ -128,7 +125,7 @@ pub mod serverlib;
 
 #[derive(Aargvark)]
 struct Args {
-    config: AargvarkJson<config::latest::Config>,
+    config: AargvarkJson<config::Config>,
     /// Log excessive information.
     debug: Option<()>,
     /// Validate config then exit.
@@ -157,21 +154,19 @@ fn bury(root: &mut Option<serde_json::Value>, path: &[String], value: serde_json
 }
 
 async fn main2() -> Result<(), loga::Error> {
-    if unsafe {
-        mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)
-    } != 0 {
-        return Err(loga::err("mlockall failed, couldn't prevent memory from paging out"));
-    }
-    let tm = TaskManager::new();
     let args = vark::<Args>();
     if args.validate.is_some() {
         return Ok(());
     }
+    let config = match args.config.value {
+        config::Config::V1(c) => c,
+    };
     let log = Log::new_root(if args.debug.is_some() {
         loga::DEBUG
     } else {
         loga::INFO
     });
+    let tm = TaskManager::new();
     for domain in [None, Some("Gtk"), Some("GLib"), Some("Gdk")] {
         gtk4::glib::log_set_handler(domain, LogLevels::all(), true, true, {
             let log = log.clone();
@@ -186,7 +181,6 @@ async fn main2() -> Result<(), loga::Error> {
             }
         });
     }
-    let config = args.config.value;
 
     // Data prep + preprocessing
     let users = unsafe {

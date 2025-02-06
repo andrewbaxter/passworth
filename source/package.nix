@@ -16,4 +16,34 @@ let
 in
 naersk.buildPackage {
   root = ./.;
+  nativeBuildInputs = [
+    pkgs.pkg-config
+    pkgs.cargo
+    pkgs.rustc
+    pkgs.rustPlatform.bindgenHook
+    pkgs.llvmPackages.libclang
+    pkgs.makeWrapper
+  ];
+  buildInputs = [
+    pkgs.at-spi2-atk
+    pkgs.atkmm
+    pkgs.cairo
+    pkgs.gdk-pixbuf
+    pkgs.glib
+    pkgs.gtk4
+    pkgs.harfbuzz
+    pkgs.librsvg
+    pkgs.libsoup_3
+    pkgs.pango
+    pkgs.nettle
+    pkgs.pcsclite
+    pkgs.openssl
+  ];
+  postInstall = let 
+    libs = [ pkgs.openssl pkgs.nettle pkgs.gmp pkgs.bzip2 pkgs.pcsclite pkgs.gtk4 pkgs.pango pkgs.glib ];
+  in ''
+    wrapProgram $out/bin/passworth-server --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
+    wrapProgram $out/bin/passworth --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
+    rm $out/bin/generate_jsonschema
+  '';
 }
