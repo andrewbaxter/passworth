@@ -57,9 +57,8 @@ struct GetCommand {
     path: SpecificPath,
     /// Optionally retrieve the latest data at or before a previous revision id.
     at: Option<i64>,
-    /// Extract primitive value from json - i.e. unquote strings, do nothing for
-    /// numbers and bools. Errors if not primitive.
-    extract: Option<()>,
+    /// Output json encoded data rather than de-quoting strings.
+    json: Option<()>,
 }
 
 #[derive(Aargvark)]
@@ -194,33 +193,13 @@ async fn main2() -> Result<(), loga::Error> {
                 paths: vec![args.path],
                 at: args.at,
             }).await?;
-            if args.extract.is_some() {
-                match &res {
-                    serde_json::Value::Null => {
-                        print!("null");
-                    },
-                    serde_json::Value::Bool(v) => {
-                        print!("{}", v);
-                    },
-                    serde_json::Value::Number(number) => {
-                        print!("{}", number);
-                    },
-                    serde_json::Value::String(v) => {
-                        print!("{}", v);
-                    },
-                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                        return Err(
-                            loga::err(
-                                format!(
-                                    "Got non-primitive value, can't extract: {}",
-                                    serde_json::to_string(&res).unwrap()
-                                ),
-                            ),
-                        );
-                    },
-                }
-            } else {
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            match (args.json.is_some(), &res) {
+                (false, serde_json::Value::String(v)) => {
+                    println!("{}", v);
+                },
+                (_, res) => {
+                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                },
             }
         },
         Command::Set(args) => {
