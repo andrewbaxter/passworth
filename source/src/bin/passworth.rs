@@ -2,67 +2,40 @@ use {
     aargvark::{
         traits_impls::{
             AargvarkFile,
-            AargvarkFromStr,
+            AargvarkJson,
         },
         vark,
         Aargvark,
     },
     loga::{
+        ea,
         fatal,
         Log,
+        ResultContext,
     },
     passworth::{
         crypto::{
             get_card_pubkey,
             CardStream,
         },
+        datapath::SpecificPath,
         proto::{
             self,
             ipc_path,
             C2SGenerateVariant,
         },
     },
-    std::{
-        io::Write,
-    },
+    std::io::Write,
 };
-
-struct PassworthPath(Vec<String>);
-
-impl AargvarkFromStr for PassworthPath {
-    fn from_str(s: &str) -> Result<Self, String> {
-        return Ok(PassworthPath(serde_json::from_str(s).map_err(|e| e.to_string())?));
-    }
-
-    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
-        return aargvark::help::HelpPattern(
-            vec![aargvark::help::HelpPatternElement::Type("JSON ARRAY[STRING]".to_string())],
-        );
-    }
-}
-
-struct PassworthSet((Vec<String>, serde_json::Value));
-
-impl AargvarkFromStr for PassworthSet {
-    fn from_str(s: &str) -> Result<Self, String> {
-        return Ok(PassworthSet(serde_json::from_str(s).map_err(|e| e.to_string())?));
-    }
-
-    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
-        return aargvark::help::HelpPattern(
-            vec![aargvark::help::HelpPatternElement::Type("JSON ARRAY[ARRAY[STRING], ANY]".to_string())],
-        );
-    }
-}
 
 #[derive(Aargvark)]
 enum GenerateVariant {
-    /// Generate random bytes, encoded as base664
+    /// Generate random bytes, encoded as base64
     Bytes {
         length: usize,
     },
     /// Generate a password with a shorter visually-unambiguous, case-insensitive
-    /// alphabet.
+    /// alphanumeric characters.
     SafeAlphanumeric {
         length: usize,
     },
@@ -80,8 +53,9 @@ enum GenerateVariant {
 
 #[derive(Aargvark)]
 struct GetCommand {
-    paths: Vec<PassworthPath>,
-    /// Optionally retrieve data from a previous revision.
+    /// A path to get data for, in `/path/to/data` format.
+    path: SpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
     at: Option<i64>,
     /// Extract primitive value from json - i.e. unquote strings, do nothing for
     /// numbers and bools. Errors if not primitive.
@@ -89,9 +63,17 @@ struct GetCommand {
 }
 
 #[derive(Aargvark)]
+struct SetCommand {
+    /// Path to create/overwrite
+    path: SpecificPath,
+    /// JSON data to set at path. Setting to null will delete the data.
+    value: String,
+}
+
+#[derive(Aargvark)]
 struct MoveCommand {
-    from: PassworthPath,
-    to: PassworthPath,
+    from: SpecificPath,
+    to: SpecificPath,
     /// If force is off and the destination path already has data, this will error.
     /// Setting force will override the data.
     overwrite: Option<()>,
@@ -100,7 +82,7 @@ struct MoveCommand {
 #[derive(Aargvark)]
 struct GenerateCommand {
     /// Where to store the generated data.
-    path: PassworthPath,
+    path: SpecificPath,
     /// What sort of data to generate.
     variant: GenerateVariant,
     /// Write the generated data even if data already exists at the path (overwrites
@@ -111,35 +93,41 @@ struct GenerateCommand {
 #[derive(Aargvark)]
 struct PgpSignCommand {
     /// Path of key (in ascii-armor format) to sign with
-    key: PassworthPath,
-    /// Data to sign
+    key: SpecificPath,
+    /// Data to sign.
     data: AargvarkFile,
 }
 
 #[derive(Aargvark)]
 struct PgpDecryptCommand {
     /// Path of key (in ascii-armor format) to decrypt with
-    key: PassworthPath,
-    /// Data to decrypt
+    key: SpecificPath,
+    /// Data to decrypt.
     data: AargvarkFile,
 }
 
 #[derive(Aargvark)]
 struct ListRevisionsCommand {
-    paths: Vec<PassworthPath>,
+    /// Retrieve the revision ids of the data at each path.
+    paths: Vec<SpecificPath>,
     /// Retrieve the revisions immediately before a previous revision.
     at: Option<i64>,
 }
 
 #[derive(Aargvark)]
 struct RevertCommand {
-    paths: Vec<PassworthPath>,
+    /// Revert the data at the specified paths to their value at or before the
+    /// specified revision.
+    paths: Vec<SpecificPath>,
+    /// The revision id.
     at: i64,
 }
 
 #[derive(Aargvark)]
 #[vark(break_help)]
 enum Command {
+    /// Execute a JSON IPC command directly (see ipc jsonschema).
+    Json(AargvarkJson<proto::msg::Req>),
     /// Trigger unlock and wait for it to complete.
     Unlock,
     /// Trigger lock and wait for it to complete.
@@ -148,15 +136,15 @@ enum Command {
     /// JSON tree).
     Get(GetCommand),
     /// Unlock if locked, and replace the data at the following paths.
-    Set(Vec<PassworthSet>),
+    Set(SetCommand),
     /// Move data from one location to another.
     Move(MoveCommand),
     /// Generate a secret and store it at the specified location - for asymmetric keys
     /// returns the public portion.
     Generate(GenerateCommand),
-    /// Produce a pgp signature on data
+    /// Produce a pgp signature on data using a stored key.
     PgpSign(PgpSignCommand),
-    /// Do pgp decryption on data
+    /// Do pgp decryption on data using a stored key.
     PgpDecrypt(PgpDecryptCommand),
     /// List revision ids and timestamps for any values under the specified paths
     /// (merged into one JSON tree).
@@ -164,8 +152,8 @@ enum Command {
     /// Restore data from a previous revision. Note that this preserves history, so you
     /// can restore to before the restore to undo a restore operation.
     Revert(RevertCommand),
-    /// Listen for smartcards (usb and nfc) and show their fingerprints as can be used
-    /// in config
+    /// Listen for smartcards (usb and nfc) and show their fingerprints in a format
+    /// that can be used for config.
     ScanCards,
 }
 
@@ -178,6 +166,23 @@ async fn req<T: proto::msg::ReqTrait>(body: T) -> Result<T::Resp, loga::Error> {
 async fn main2() -> Result<(), loga::Error> {
     let log = Log::new_root(loga::INFO);
     match vark::<Command>() {
+        Command::Json(args) => {
+            let resp =
+                proto::msg::Client::new(ipc_path())
+                    .await
+                    .map_err(loga::err)?
+                    .send_req_enum(&args.value)
+                    .await
+                    .map_err(loga::err)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::from_slice::<serde_json::Value>(
+                        &resp,
+                    ).context_with("Received invalid JSON response", ea!(resp = String::from_utf8_lossy(&resp)))?,
+                ).unwrap()
+            );
+        },
         Command::Unlock => {
             req(proto::ReqUnlock).await?;
         },
@@ -186,7 +191,7 @@ async fn main2() -> Result<(), loga::Error> {
         },
         Command::Get(args) => {
             let res = req(proto::ReqGet {
-                paths: args.paths.into_iter().map(|x| x.0).collect(),
+                paths: vec![args.path],
                 at: args.at,
             }).await?;
             if args.extract.is_some() {
@@ -218,19 +223,23 @@ async fn main2() -> Result<(), loga::Error> {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());
             }
         },
-        Command::Set(pairs) => {
-            req(proto::ReqSet(pairs.into_iter().map(|p| p.0).collect())).await?;
+        Command::Set(args) => {
+            req(
+                proto::ReqSet(
+                    vec![(args.path, serde_json::from_str(&args.value).context("Error parsing set value as JSON")?)],
+                ),
+            ).await?;
         },
         Command::Move(args) => {
             req(proto::ReqMove {
-                from: args.from.0,
-                to: args.to.0,
+                from: args.from,
+                to: args.to,
                 overwrite: args.overwrite.is_some(),
             }).await?;
         },
         Command::Generate(args) => {
             let res = req(proto::ReqGenerate {
-                path: args.path.0,
+                path: args.path,
                 variant: match args.variant {
                     GenerateVariant::Bytes { length } => C2SGenerateVariant::Bytes { length: length },
                     GenerateVariant::SafeAlphanumeric { length } => C2SGenerateVariant::SafeAlphanumeric {
@@ -248,7 +257,7 @@ async fn main2() -> Result<(), loga::Error> {
         },
         Command::PgpSign(args) => {
             let res = req(proto::ReqPgpSign {
-                key: args.key.0,
+                key: args.key,
                 data: args.data.value,
             }).await?;
             std::io::stdout().write_all(&res).unwrap();
@@ -256,7 +265,7 @@ async fn main2() -> Result<(), loga::Error> {
         },
         Command::PgpDecrypt(args) => {
             let res = req(proto::ReqPgpDecrypt {
-                key: args.key.0,
+                key: args.key,
                 data: args.data.value,
             }).await?;
             std::io::stdout().write_all(&res).unwrap();
@@ -264,14 +273,14 @@ async fn main2() -> Result<(), loga::Error> {
         },
         Command::ListRevisions(args) => {
             let res = req(proto::ReqGetRevisions {
-                paths: args.paths.into_iter().map(|x| x.0).collect(),
+                paths: args.paths,
                 at: args.at,
             }).await?;
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
         Command::Revert(args) => {
             req(proto::ReqRevert {
-                paths: args.paths.into_iter().map(|x| x.0).collect(),
+                paths: args.paths,
                 at: args.at,
             }).await?;
         },

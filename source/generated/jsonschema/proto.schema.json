@@ -1,0 +1,402 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Req",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "unlock"
+      ],
+      "properties": {
+        "unlock": {
+          "$ref": "#/definitions/ReqUnlock"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "lock"
+      ],
+      "properties": {
+        "lock": {
+          "$ref": "#/definitions/ReqLock"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get"
+      ],
+      "properties": {
+        "get": {
+          "$ref": "#/definitions/ReqGet"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "set"
+      ],
+      "properties": {
+        "set": {
+          "$ref": "#/definitions/ReqSet"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "move"
+      ],
+      "properties": {
+        "move": {
+          "$ref": "#/definitions/ReqMove"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "generate"
+      ],
+      "properties": {
+        "generate": {
+          "$ref": "#/definitions/ReqGenerate"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "pgp_sign"
+      ],
+      "properties": {
+        "pgp_sign": {
+          "$ref": "#/definitions/ReqPgpSign"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "pgp_decrypt"
+      ],
+      "properties": {
+        "pgp_decrypt": {
+          "$ref": "#/definitions/ReqPgpDecrypt"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_revisions"
+      ],
+      "properties": {
+        "get_revisions": {
+          "$ref": "#/definitions/ReqGetRevisions"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "revert"
+      ],
+      "properties": {
+        "revert": {
+          "$ref": "#/definitions/ReqRevert"
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "C2SGenerateVariant": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "pgp"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "bytes"
+          ],
+          "properties": {
+            "bytes": {
+              "type": "object",
+              "required": [
+                "length"
+              ],
+              "properties": {
+                "length": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "safe_alphanumeric"
+          ],
+          "properties": {
+            "safe_alphanumeric": {
+              "type": "object",
+              "required": [
+                "length"
+              ],
+              "properties": {
+                "length": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "alphanumeric"
+          ],
+          "properties": {
+            "alphanumeric": {
+              "type": "object",
+              "required": [
+                "length"
+              ],
+              "properties": {
+                "length": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "alphanumeric_symbols"
+          ],
+          "properties": {
+            "alphanumeric_symbols": {
+              "type": "object",
+              "required": [
+                "length"
+              ],
+              "properties": {
+                "length": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ReqGenerate": {
+      "type": "object",
+      "required": [
+        "overwrite",
+        "path",
+        "variant"
+      ],
+      "properties": {
+        "overwrite": {
+          "type": "boolean"
+        },
+        "path": {
+          "$ref": "#/definitions/snake_case"
+        },
+        "variant": {
+          "$ref": "#/definitions/C2SGenerateVariant"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReqGet": {
+      "type": "object",
+      "required": [
+        "paths"
+      ],
+      "properties": {
+        "at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/snake_case"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReqGetRevisions": {
+      "type": "object",
+      "required": [
+        "paths"
+      ],
+      "properties": {
+        "at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/snake_case"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReqLock": {
+      "type": "null"
+    },
+    "ReqMove": {
+      "type": "object",
+      "required": [
+        "from",
+        "overwrite",
+        "to"
+      ],
+      "properties": {
+        "from": {
+          "$ref": "#/definitions/snake_case"
+        },
+        "overwrite": {
+          "type": "boolean"
+        },
+        "to": {
+          "$ref": "#/definitions/snake_case"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReqPgpDecrypt": {
+      "type": "object",
+      "required": [
+        "data",
+        "key"
+      ],
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "key": {
+          "$ref": "#/definitions/snake_case"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReqPgpSign": {
+      "type": "object",
+      "required": [
+        "data",
+        "key"
+      ],
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "key": {
+          "$ref": "#/definitions/snake_case"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReqRevert": {
+      "type": "object",
+      "required": [
+        "at",
+        "paths"
+      ],
+      "properties": {
+        "at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/snake_case"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReqSet": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": [
+          {
+            "$ref": "#/definitions/snake_case"
+          },
+          true
+        ],
+        "maxItems": 2,
+        "minItems": 2
+      }
+    },
+    "ReqUnlock": {
+      "type": "null"
+    },
+    "snake_case": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

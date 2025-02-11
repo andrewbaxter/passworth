@@ -1,4 +1,5 @@
 use {
+    crate::datapath::SpecificPath,
     glove::reqresp,
     schemars::JsonSchema,
     serde::{
@@ -13,7 +14,6 @@ use {
 
 pub const DEFAULT_SOCKET: &str = "/run/passworth.sock";
 pub const ENV_SOCKET: &str = "PASSWORTH_SOCK";
-pub type PassPath = Vec<String>;
 
 pub fn ipc_path() -> PathBuf {
     if let Some(v) = env::var_os(ENV_SOCKET) {
@@ -52,26 +52,26 @@ pub struct ReqLock;
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ReqGet {
-    pub paths: Vec<PassPath>,
+    pub paths: Vec<SpecificPath>,
     pub at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct ReqSet(pub Vec<(PassPath, serde_json::Value)>);
+pub struct ReqSet(pub Vec<(SpecificPath, serde_json::Value)>);
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ReqMove {
-    pub from: PassPath,
-    pub to: PassPath,
+    pub from: SpecificPath,
+    pub to: SpecificPath,
     pub overwrite: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ReqGenerate {
-    pub path: PassPath,
+    pub path: SpecificPath,
     pub variant: C2SGenerateVariant,
     pub overwrite: bool,
 }
@@ -79,28 +79,28 @@ pub struct ReqGenerate {
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ReqPgpSign {
-    pub key: PassPath,
+    pub key: SpecificPath,
     pub data: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ReqPgpDecrypt {
-    pub key: PassPath,
+    pub key: SpecificPath,
     pub data: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ReqGetRevisions {
-    pub paths: Vec<PassPath>,
+    pub paths: Vec<SpecificPath>,
     pub at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ReqRevert {
-    pub paths: Vec<PassPath>,
+    pub paths: Vec<SpecificPath>,
     pub at: i64,
 }
 

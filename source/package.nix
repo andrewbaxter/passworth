@@ -39,11 +39,14 @@ naersk.buildPackage {
     pkgs.pcsclite
     pkgs.openssl
   ];
-  postInstall = let 
-    libs = [ pkgs.openssl pkgs.nettle pkgs.gmp pkgs.bzip2 pkgs.pcsclite pkgs.gtk4 pkgs.pango pkgs.glib ];
-  in ''
-    wrapProgram $out/bin/passworth-server --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
-    wrapProgram $out/bin/passworth --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
-    rm $out/bin/generate_jsonschema
-  '';
+  postInstall =
+    let
+      libs = [ pkgs.openssl pkgs.nettle pkgs.gmp pkgs.bzip2 pkgs.pcsclite pkgs.gtk4 pkgs.pango pkgs.glib ];
+    in
+    ''
+      rm $out/bin/generate_jsonschema
+      wrapProgram $out/bin/passworth-server --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
+      wrapProgram $out/bin/passworth --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
+      (cd $out/bin; ln -s passworth pw)
+    '';
 }

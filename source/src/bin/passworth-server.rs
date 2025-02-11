@@ -2,10 +2,6 @@
 
 use {
     crate::serverlib::{
-        datapath::{
-            specific_from_db_path,
-            specific_to_db_path,
-        },
         dbutil::open_privdb,
         factor::build_factor_tree,
         fg::{
@@ -29,9 +25,7 @@ use {
         glib::LogLevels,
         prelude::ApplicationExtManual,
     },
-    libc::{
-        c_void,
-    },
+    libc::c_void,
     loga::{
         conversion::ResultIgnore,
         ea,
@@ -42,6 +36,7 @@ use {
     },
     passworth::{
         config,
+        datapath::SpecificPath,
         generate,
         proto::{
             self,
@@ -101,9 +96,7 @@ use {
     },
     taskmanager::TaskManager,
     tokio::{
-        fs::{
-            create_dir_all,
-        },
+        fs::create_dir_all,
         select,
         spawn,
         sync::{
@@ -132,12 +125,12 @@ struct Args {
     validate: Option<()>,
 }
 
-fn bury(root: &mut Option<serde_json::Value>, path: &[String], value: serde_json::Value) {
+fn bury(root: &mut Option<serde_json::Value>, path: &SpecificPath, value: serde_json::Value) {
     if root.is_none() {
         *root = Some(serde_json::Value::Null);
     }
     let mut at = root.as_mut().unwrap();
-    for seg in path {
+    for seg in &path.0 {
         match &at {
             serde_json::Value::Object(_) => (),
             _ => {
@@ -639,11 +632,11 @@ async fn main2() -> Result<(), loga::Error> {
                         let peer_meta = scan_principal(&log, pid).await?;
 
                         // Helpers for command processing
-                        let set = |txn: &mut rusqlite::Transaction, pairs: Vec<(Vec<String>, Option<serde_json::Value>)>| {
+                        let set = |txn: &mut rusqlite::Transaction, pairs: Vec<(SpecificPath, Option<serde_json::Value>)>| {
                             let now = Utc::now();
                             for (mut path, value) in pairs {
                                 // Clear out everything above and below that would be shaded by this
-                                for row in privdb::values_get_above_below(txn, &specific_to_db_path(&path), i64::MAX)? {
+                                for row in privdb::values_get_above_below(txn, &path.to_string(), i64::MAX)? {
                                     privdb::values_insert(txn, now, &row.path, None)?;
                                 }
 
@@ -652,7 +645,7 @@ async fn main2() -> Result<(), loga::Error> {
                                 while let Some((seg, at, descending)) = stack.pop() {
                                     if descending {
                                         if let Some(seg) = &seg {
-                                            path.push(seg.clone());
+                                            path.0.push(seg.clone());
                                         }
                                         match &at {
                                             Some(serde_json::Value::Object(o)) => {
@@ -664,7 +657,7 @@ async fn main2() -> Result<(), loga::Error> {
                                                 privdb::values_insert(
                                                     txn,
                                                     now,
-                                                    &specific_to_db_path(&path),
+                                                    &path.to_string(),
                                                     at
                                                         .as_ref()
                                                         .map(|at| serde_json::to_string(&at).unwrap())
@@ -676,7 +669,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         stack.push((seg, at, false));
                                     } else {
                                         if seg.is_some() {
-                                            path.pop();
+                                            path.0.pop();
                                         }
                                     }
                                 }
@@ -684,20 +677,18 @@ async fn main2() -> Result<(), loga::Error> {
                             return Ok(()) as Result<_, loga::Error>;
                         };
                         let get =
-                            |txn: &mut rusqlite::Transaction, path: &Vec<String>, at: Option<i64>| ->
+                            |txn: &mut rusqlite::Transaction, path: &SpecificPath, at: Option<i64>| ->
                                 Result<Option<serde_json::Value>, loga::Error> {
                                 let mut root = None;
-                                for row in privdb::values_get(
-                                    txn,
-                                    &specific_to_db_path(&path),
-                                    at.unwrap_or(i64::MAX),
-                                )? {
+                                for row in privdb::values_get(txn, &path.to_string(), at.unwrap_or(i64::MAX))? {
                                     let Some(row_data) = row.data else {
                                         continue;
                                     };
                                     bury(
                                         &mut root,
-                                        &specific_from_db_path(&row.path).split_off(path.len()),
+                                        &SpecificPath(
+                                            SpecificPath::from_str(&row.path).unwrap().0.split_off(path.0.len()),
+                                        ),
                                         serde_json::from_str::<serde_json::Value>(&row_data).unwrap(),
                                     );
                                 }
@@ -719,7 +710,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             state.fg_tx.clone(),
                                             &rules,
                                             &peer_meta,
-                                            &[vec!["".to_string()]],
+                                            &[SpecificPath(vec!["".to_string()])],
                                         )
                                             .await?
                                             .lock {
@@ -734,7 +725,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             state.fg_tx.clone(),
                                             &rules,
                                             &peer_meta,
-                                            &[vec!["".to_string()]],
+                                            &[SpecificPath(vec!["".to_string()])],
                                         )
                                             .await?
                                             .lock {
@@ -1088,16 +1079,20 @@ async fn main2() -> Result<(), loga::Error> {
                                             for path in req.paths {
                                                 for row in privdb::values_get(
                                                     &mut privdbc,
-                                                    &specific_to_db_path(&path),
+                                                    &path.to_string(),
                                                     req.at.map(|x| x as i64).unwrap_or(i64::MAX),
                                                 )? {
                                                     if row.data.is_none() {
                                                         continue;
                                                     }
-                                                    bury(&mut root, &specific_from_db_path(&row.path), json!({
-                                                        "rev_id": row.rev_id,
-                                                        "rev_stamp": row.rev_stamp.to_rfc3339(),
-                                                    }));
+                                                    bury(
+                                                        &mut root,
+                                                        &SpecificPath::from_str(&row.path).unwrap(),
+                                                        json!({
+                                                            "rev_id": row.rev_id,
+                                                            "rev_stamp": row.rev_stamp.to_rfc3339(),
+                                                        }),
+                                                    );
                                                 }
                                             }
                                             return Ok(root.unwrap()) as Result<_, loga::Error>;

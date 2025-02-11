@@ -1,8 +1,4 @@
 use {
-    super::datapath::{
-        glob_from_db_path,
-        GlobSeg,
-    },
     crate::serverlib::fg::{
         B2FPrompt,
         B2F,
@@ -15,11 +11,18 @@ use {
         Log,
         ResultContext,
     },
-    passworth::config::latest::{
-        ConfigPermissionRule,
-        ConfigPrompt,
-        MatchBinary,
-        UserGroupId,
+    passworth::{
+        config::latest::{
+            ConfigPermissionRule,
+            ConfigPrompt,
+            MatchBinary,
+            UserGroupId,
+        },
+        datapath::{
+            GlobPath,
+            GlobSeg,
+            SpecificPath,
+        },
     },
     std::{
         collections::HashMap,
@@ -27,6 +30,7 @@ use {
         mem::swap,
         os::unix::fs::MetadataExt,
         path::PathBuf,
+        str::FromStr,
         sync::Arc,
     },
     tokio::{
@@ -114,14 +118,14 @@ pub fn build_rule_tree(
             prompt: rule.prompt.clone(),
         });
         for path in &rule.paths {
-            let segs = glob_from_db_path(path)?;
+            let segs = GlobPath::from_str(path)?;
             let mut at = &mut rules;
-            for seg in segs {
+            for seg in segs.0 {
                 match seg {
-                    GlobSeg::Literal(seg) => {
+                    GlobSeg::Lit(seg) => {
                         at = at.children.entry(seg).or_default();
                     },
-                    GlobSeg::Wildcard => {
+                    GlobSeg::Glob => {
                         at = at.wildcard.get_or_insert_with(|| Box::new(RuleTree::default()));
                     },
                 }
@@ -323,7 +327,7 @@ pub async fn permit(
     fg_tx: mpsc::Sender<B2F>,
     rules: &RuleTree,
     principal: &PrincipalMeta,
-    paths: &[Vec<String>],
+    paths: &[SpecificPath],
 ) -> Result<Perms, loga::Error> {
     let mut total_lock = true;
     let mut total_derive = true;
@@ -342,7 +346,7 @@ pub async fn permit(
         let mut path_write = false;
         let mut tails = vec![rules];
         let mut new_tails = vec![];
-        for seg in path {
+        for seg in &path.0 {
             for tail in tails.drain(..) {
                 for rule in &tail.rules {
                     let mut matched = true;

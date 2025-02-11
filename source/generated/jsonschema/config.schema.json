@@ -212,7 +212,7 @@
           ]
         },
         "paths": {
-          "description": "Paths to which this rule applies. To apply to everything, use the empty path `\"\"`. In the format `/seg/seg/.../seg` - no initial slash. Segments are literals or `*`, and `*` and `/` can be escaped with a backslash. `*` is a wildcard, and must appear as a whole segment.",
+          "description": "Paths to which this rule applies. In the format `/seg/seg/.../seg`. To apply to everything, use the empty path `\"\"` - no initial slash. Segments are literals or `*`. `*` is a wildcard, and must appear as a whole segment. `*` and `/` can be escaped with a backslash.",
           "type": "array",
           "items": {
             "type": "string"
