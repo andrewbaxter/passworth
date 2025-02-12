@@ -63,7 +63,7 @@ impl ToString for SpecificPath {
 
 impl AargvarkFromStr for SpecificPath {
     fn from_str(s: &str) -> Result<Self, String> {
-        return Ok(SpecificPath(serde_json::from_str(s).map_err(|e| e.to_string())?));
+        return Ok(<SpecificPath as FromStr>::from_str(s).map_err(|e| e.to_string())?);
     }
 
     fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
