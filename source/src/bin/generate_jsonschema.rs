@@ -34,15 +34,18 @@ fn main() {
             };
         }
 
-        write_resp!(ReqUnlock);
         write_resp!(ReqLock);
-        write_resp!(ReqGet);
-        write_resp!(ReqSet);
-        write_resp!(ReqMove);
-        write_resp!(ReqGenerate);
-        write_resp!(ReqPgpSign);
-        write_resp!(ReqPgpDecrypt);
-        write_resp!(ReqGetRevisions);
-        write_resp!(ReqRevert);
+        write_resp!(ReqMetaKeys);
+        write_resp!(ReqMetaRevisions);
+        write_resp!(ReqMetaPgpPubkey);
+        write_resp!(ReqMetaSshPubkey);
+        write_resp!(ReqRead);
+        write_resp!(ReqWrite);
+        write_resp!(ReqWriteGenerate);
+        write_resp!(ReqWriteMove);
+        write_resp!(ReqWriteRevert);
+        write_resp!(ReqDerivePgpSign);
+        write_resp!(ReqDerivePgpDecrypt);
+        write_resp!(ReqDeriveOtp);
     }
 }

@@ -54,7 +54,7 @@ pub struct ConfigAuthMethod {
     pub root_factor: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ConfigPrompt {
     pub description: String,
@@ -80,12 +80,29 @@ pub struct MatchUser {
     pub walk_ancestors: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MatchBinary {
     pub path: PathBuf,
     #[serde(default)]
     pub walk_ancestors: bool,
+}
+
+/// Actions permitted by a rule. Later levels include all prior levels.
+#[derive(Serialize, Deserialize, Clone, JsonSchema, Copy, Debug)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PermitLevel {
+    /// Lock and unlock the password store
+    Lock = 0,
+    /// Retrieve json keys but not values, public keys derived from stored private keys.
+    Meta,
+    /// Use the contents of values without directly revealing the value:generate
+    /// signatures, decryption, totp generation, etc.
+    Derive,
+    /// Retrieve the contents of values
+    Read,
+    /// Set values
+    Write,
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
@@ -107,18 +124,7 @@ pub struct ConfigPermissionRule {
     #[serde(default)]
     pub match_binary: Option<MatchBinary>,
     /// Permission to explicitly lock or unlock.
-    #[serde(default)]
-    pub permit_lock: bool,
-    /// Permission to lock/unlock and indirectly access data via derivation - totp,
-    /// asymmetric signatures, decryption
-    #[serde(default)]
-    pub permit_derive: bool,
-    /// Lock/unlock or read the credential data itself
-    #[serde(default)]
-    pub permit_read: bool,
-    /// Lock/unlock, write or read the credential data itself.
-    #[serde(default)]
-    pub permit_write: bool,
+    pub permit: PermitLevel,
     /// Configure if access requires prompting.
     #[serde(default)]
     pub prompt: Option<ConfigPrompt>,

@@ -1,6 +1,8 @@
+//! Paths are a concatenated sequence of `/`-prepended escaped strings. This makes
+//! the representations of a path with an "empty segment", a path with two "empty
+//! segments" and an "empty path" unambiguous while remaining moderately usable.
 use {
     aargvark::traits_impls::AargvarkFromStr,
-    loga::ea,
     schemars::JsonSchema,
     serde::{
         Deserialize,
@@ -8,6 +10,33 @@ use {
     },
     std::str::FromStr,
 };
+
+struct Reader {
+    i: usize,
+    data: Vec<char>,
+}
+
+impl Reader {
+    fn new(data: &str) -> Self {
+        return Self {
+            i: 0,
+            data: data.chars().collect(),
+        };
+    }
+
+    fn peek(&mut self) -> Option<(usize, char)> {
+        if self.i >= self.data.len() {
+            return None;
+        }
+        return Some((self.i, self.data[self.i]));
+    }
+
+    fn eat(&mut self) -> Option<(usize, char)> {
+        let out = self.peek();
+        self.i += 1;
+        return out;
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename = "snake_case", deny_unknown_fields)]
@@ -17,35 +46,37 @@ impl FromStr for SpecificPath {
     type Err = loga::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let path = s.as_bytes();
+        let mut path = Reader::new(s);
         let mut out = vec![];
-        if path.len() == 0 {
-            return Ok(SpecificPath(out));
-        }
-        let mut buf = vec![];
-        let mut escape = false;
-        if path[0] != b'/' {
-            panic!();
-        }
-        for i in 1 .. path.len() {
-            if escape {
-                buf.push(path[i]);
-                escape = false;
-            } else {
-                match path[i] {
-                    b'\\' => {
-                        escape = true;
-                    },
-                    b'/' => {
-                        out.push(String::from_utf8(buf.split_off(0)).unwrap());
-                    },
-                    c => {
-                        buf.push(c);
-                    },
+        while let Some((i, c)) = path.eat() {
+            if c != '/' {
+                return Err(loga::err(format!("Path segment missing leading slash at {}", i)));
+            }
+            let mut buf = vec![];
+            let mut escape = false;
+            while let Some((_, c)) = path.peek() {
+                if escape {
+                    path.eat();
+                    buf.push(c);
+                    escape = false;
+                } else {
+                    match c {
+                        '\\' => {
+                            path.eat();
+                            escape = true;
+                        },
+                        '/' => {
+                            break;
+                        },
+                        _ => {
+                            path.eat();
+                            buf.push(c);
+                        },
+                    }
                 }
             }
+            out.push(buf.drain(..).collect());
         }
-        out.push(String::from_utf8(buf).unwrap());
         return Ok(SpecificPath(out));
     }
 }
@@ -68,7 +99,7 @@ impl AargvarkFromStr for SpecificPath {
 
     fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
         return aargvark::help::HelpPattern(
-            vec![aargvark::help::HelpPatternElement::Type("/PATH/TO/DATA".to_string())],
+            vec![aargvark::help::HelpPatternElement::Type("PATH/TO/DATA".to_string())],
         );
     }
 }
@@ -88,54 +119,49 @@ impl FromStr for GlobPath {
     type Err = loga::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let path = s.as_bytes();
+        let mut path = Reader::new(s);
         let mut out = vec![];
-        if path.len() == 0 {
-            return Ok(Self(out));
-        }
-        let mut buf = vec![];
-        let mut escape = false;
-        let mut includes_wildcard = false;
-        if path[0] != b'/' {
-            return Err(loga::err_with("Path must either be empty or start with /", ea!(path = s)));
-        }
-        for i in 0 .. path.len() {
-            if escape {
-                buf.push(path[i]);
-                escape = false;
-            } else {
-                match path[i] {
-                    b'*' => {
-                        includes_wildcard = true;
-                        buf.push(b'*');
-                    },
-                    b'\\' => {
-                        escape = true;
-                    },
-                    b'/' => {
-                        let seg = unsafe {
-                            String::from_utf8_unchecked(buf.split_off(0))
-                        };
-                        if seg.len() == 1 && includes_wildcard {
-                            out.push(GlobSeg::Glob);
-                        } else {
-                            out.push(GlobSeg::Lit(seg));
-                        }
-                        includes_wildcard = false;
-                    },
-                    c => {
-                        buf.push(c);
-                    },
+        while let Some((i, c)) = path.eat() {
+            if c != '/' {
+                return Err(loga::err(format!("Path segment missing leading slash at {}", i)));
+            }
+            let mut buf = vec![];
+            let mut escape = false;
+            let mut includes_wildcard = false;
+            while let Some((_, c)) = path.peek() {
+                if escape {
+                    path.eat();
+                    buf.push(c);
+                    escape = false;
+                } else {
+                    match c {
+                        '*' => {
+                            path.eat();
+                            includes_wildcard = true;
+                            buf.push('*');
+                        },
+                        '\\' => {
+                            path.eat();
+                            escape = true;
+                        },
+                        '/' => {
+                            break;
+                        },
+                        _ => {
+                            path.eat();
+                            buf.push(c);
+                        },
+                    }
                 }
             }
-        }
-        let seg = unsafe {
-            String::from_utf8_unchecked(buf.split_off(0))
-        };
-        if seg.len() == 1 && includes_wildcard {
-            out.push(GlobSeg::Glob);
-        } else {
-            out.push(GlobSeg::Lit(seg));
+            let seg = buf.into_iter().collect::<String>();
+            if !seg.is_empty() {
+                if seg.len() == 1 && includes_wildcard {
+                    out.push(GlobSeg::Glob);
+                } else {
+                    out.push(GlobSeg::Lit(seg));
+                }
+            }
         }
         return Ok(Self(out));
     }

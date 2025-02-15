@@ -23,54 +23,102 @@ use {
             self,
             ipc_path,
             C2SGenerateVariant,
+            C2SGenerateVariantAlphanumeric,
+            C2SGenerateVariantAlphanumericSymbols,
+            C2SGenerateVariantBytes,
+            C2SGenerateVariantSafeAlphanumeric,
         },
     },
-    std::io::Write,
+    std::io::{
+        stdin,
+        Read,
+        Write,
+    },
 };
+
+#[derive(Aargvark)]
+struct GenerateVariantBytes {
+    length: usize,
+}
+
+#[derive(Aargvark)]
+struct GenerateVariantSafeAlphanumeric {
+    length: usize,
+}
+
+#[derive(Aargvark)]
+struct GenerateVariantAlphanumeric {
+    length: usize,
+}
+
+#[derive(Aargvark)]
+struct GenerateVariantAlphanumericSymbols {
+    length: usize,
+}
 
 #[derive(Aargvark)]
 enum GenerateVariant {
     /// Generate random bytes, encoded as base64
-    Bytes {
-        length: usize,
-    },
+    Bytes(GenerateVariantBytes),
     /// Generate a password with a shorter visually-unambiguous, case-insensitive
     /// alphanumeric characters.
-    SafeAlphanumeric {
-        length: usize,
-    },
+    SafeAlphanumeric(GenerateVariantSafeAlphanumeric),
     /// Generate a password using upper and lowercase alphanumeric values.
-    Alphanumeric {
-        length: usize,
-    },
+    Alphanumeric(GenerateVariantAlphanumeric),
     /// Generate a password using upper and lowercase alphanumeric values and symbols.
-    AlphanumericSymbols {
-        length: usize,
-    },
+    AlphanumericSymbols(GenerateVariantAlphanumericSymbols),
     /// Generate a PGP key.
     Pgp,
+    /// Generate an SSH key.
+    Ssh,
 }
 
 #[derive(Aargvark)]
-struct GetCommand {
+struct ReadCommand {
     /// A path to get data for, in `/path/to/data` format.
     path: SpecificPath,
     /// Optionally retrieve the latest data at or before a previous revision id.
-    at: Option<i64>,
+    revision: Option<i64>,
     /// Output json encoded data rather than de-quoting strings.
     json: Option<()>,
 }
 
 #[derive(Aargvark)]
-struct SetCommand {
-    /// Path to create/overwrite
+struct MetaKeysCommand {
+    /// A path to get keys for, in `/path/to/data` format.
     path: SpecificPath,
-    /// JSON data to set at path. Setting to null will delete the data.
-    value: String,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
 }
 
 #[derive(Aargvark)]
-struct MoveCommand {
+struct MetaPgpPubkeyCommand {
+    /// Path to the private key.
+    path: SpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+#[derive(Aargvark)]
+struct MetaSshPubkeyCommand {
+    /// Path to the private key.
+    path: SpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+#[derive(Aargvark)]
+struct WriteCommand {
+    /// Path to create/overwrite
+    path: SpecificPath,
+    /// Input is already JSON so add directly rather than encode as JSON string
+    json: Option<()>,
+    /// Input is binary, store as a B64 JSON string
+    binary: Option<()>,
+}
+
+#[derive(Aargvark)]
+struct WriteMoveCommand {
     from: SpecificPath,
     to: SpecificPath,
     /// If force is off and the destination path already has data, this will error.
@@ -79,7 +127,7 @@ struct MoveCommand {
 }
 
 #[derive(Aargvark)]
-struct GenerateCommand {
+struct WriteGenerateCommand {
     /// Where to store the generated data.
     path: SpecificPath,
     /// What sort of data to generate.
@@ -90,7 +138,7 @@ struct GenerateCommand {
 }
 
 #[derive(Aargvark)]
-struct PgpSignCommand {
+struct DerivePgpSignCommand {
     /// Path of key (in ascii-armor format) to sign with
     key: SpecificPath,
     /// Data to sign.
@@ -98,7 +146,7 @@ struct PgpSignCommand {
 }
 
 #[derive(Aargvark)]
-struct PgpDecryptCommand {
+struct DerivePgpDecryptCommand {
     /// Path of key (in ascii-armor format) to decrypt with
     key: SpecificPath,
     /// Data to decrypt.
@@ -106,11 +154,17 @@ struct PgpDecryptCommand {
 }
 
 #[derive(Aargvark)]
+struct DeriveOtpCommand {
+    /// Path of key (in `otpauth://` format) to decrypt with
+    key: SpecificPath,
+}
+
+#[derive(Aargvark)]
 struct ListRevisionsCommand {
     /// Retrieve the revision ids of the data at each path.
     paths: Vec<SpecificPath>,
-    /// Retrieve the revisions immediately before a previous revision.
-    at: Option<i64>,
+    /// Retrieve the revision data at a specific revision.
+    revision: Option<i64>,
 }
 
 #[derive(Aargvark)]
@@ -119,7 +173,8 @@ struct RevertCommand {
     /// specified revision.
     paths: Vec<SpecificPath>,
     /// The revision id.
-    at: i64,
+    #[vark(flag = "--revision")]
+    revision: i64,
 }
 
 #[derive(Aargvark)]
@@ -131,26 +186,39 @@ enum Command {
     Unlock,
     /// Trigger lock and wait for it to complete.
     Lock,
+    /// Unlock if locked, and retrieve the keys at the following paths (merged into one
+    /// JSON tree). The tree is basically the same as in "get" but where all leaf
+    /// values are `null`.
+    MetaKeys(MetaKeysCommand),
+    /// Unlock if locked and retrieve the public key for the ascii-armored pgp key at
+    /// the specified path.
+    MetaPgpPubkey(MetaPgpPubkeyCommand),
+    /// Unlock if locked and retrieve the public key for the PEM SSH key at the
+    /// specified path.
+    MetaSshPubkey(MetaSshPubkeyCommand),
     /// Unlock if locked, and retrieve the data at the following paths (merged into one
     /// JSON tree).
-    Get(GetCommand),
-    /// Unlock if locked, and replace the data at the following paths.
-    Set(SetCommand),
-    /// Move data from one location to another.
-    Move(MoveCommand),
-    /// Generate a secret and store it at the specified location - for asymmetric keys
-    /// returns the public portion.
-    Generate(GenerateCommand),
-    /// Produce a pgp signature on data using a stored key.
-    PgpSign(PgpSignCommand),
-    /// Do pgp decryption on data using a stored key.
-    PgpDecrypt(PgpDecryptCommand),
+    Read(ReadCommand),
     /// List revision ids and timestamps for any values under the specified paths
     /// (merged into one JSON tree).
-    ListRevisions(ListRevisionsCommand),
+    ReadRevisions(ListRevisionsCommand),
+    /// Unlock if locked, and replace the data at the following paths. The data is read
+    /// from stdin.
+    Write(WriteCommand),
+    /// Move data from one location to another.
+    WriteMove(WriteMoveCommand),
+    /// Generate a secret and store it at the specified location - for asymmetric keys
+    /// returns the public portion.
+    WriteGenerate(WriteGenerateCommand),
     /// Restore data from a previous revision. Note that this preserves history, so you
     /// can restore to before the restore to undo a restore operation.
-    Revert(RevertCommand),
+    WriteRevert(RevertCommand),
+    /// Produce a detached pgp signature on data using a stored key.
+    DerivePgpSign(DerivePgpSignCommand),
+    /// Do pgp decryption on data using a stored key.
+    DerivePgpDecrypt(DerivePgpDecryptCommand),
+    /// Generate an otp token from a stored `otpauth://` url.
+    DeriveOtp(DeriveOtpCommand),
     /// Listen for smartcards (usb and nfc) and show their fingerprints in a format
     /// that can be used for config.
     ScanCards,
@@ -183,16 +251,65 @@ async fn main2() -> Result<(), loga::Error> {
             );
         },
         Command::Unlock => {
-            req(proto::ReqUnlock).await?;
+            req(proto::ReqLock(proto::LockAction::Unlock)).await?;
         },
         Command::Lock => {
-            req(proto::ReqLock).await?;
+            req(proto::ReqLock(proto::LockAction::Lock)).await?;
         },
-        Command::Get(args) => {
-            let res = req(proto::ReqGet {
-                paths: vec![args.path],
-                at: args.at,
+        Command::MetaKeys(args) => {
+            let mut res = req(proto::ReqMetaKeys {
+                paths: vec![args.path.clone()],
+                at: args.revision,
             }).await?;
+
+            // Remove prefix on data
+            for seg in &args.path.0 {
+                match res {
+                    serde_json::Value::Object(mut o) => res = o.remove(seg).unwrap(),
+                    serde_json::Value::Null => {
+                        res = serde_json::Value::Null;
+                        break;
+                    },
+                    r => unreachable!("got {:?}", r),
+                }
+            }
+
+            // Output
+            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        },
+        Command::MetaPgpPubkey(args) => {
+            let res = req(proto::ReqMetaPgpPubkey {
+                path: args.path,
+                at: args.revision,
+            }).await?;
+            println!("{}", res);
+        },
+        Command::MetaSshPubkey(args) => {
+            let res = req(proto::ReqMetaSshPubkey {
+                path: args.path,
+                at: args.revision,
+            }).await?;
+            println!("{}", res);
+        },
+        Command::Read(args) => {
+            let mut res = req(proto::ReqRead {
+                paths: vec![args.path.clone()],
+                at: args.revision,
+            }).await?;
+
+            // Remove prefix on data
+            for seg in &args.path.0 {
+                match res {
+                    serde_json::Value::Object(mut o) => res = o.remove(seg).unwrap(),
+                    serde_json::Value::Null => {
+                        res = serde_json::Value::Null;
+                        break;
+                    },
+                    r => unreachable!("got {:?}", r),
+                }
+            }
+
+            // Output
             match (args.json.is_some(), &res) {
                 (false, serde_json::Value::String(v)) => {
                     println!("{}", v);
@@ -202,66 +319,80 @@ async fn main2() -> Result<(), loga::Error> {
                 },
             }
         },
-        Command::Set(args) => {
-            req(
-                proto::ReqSet(
-                    vec![(args.path, serde_json::from_str(&args.value).context("Error parsing set value as JSON")?)],
-                ),
-            ).await?;
+        Command::ReadRevisions(args) => {
+            let res = req(proto::ReqMetaRevisions {
+                paths: args.paths,
+                at: args.revision,
+            }).await?;
+            println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
-        Command::Move(args) => {
-            req(proto::ReqMove {
+        Command::Write(args) => {
+            let mut data = Vec::new();
+            stdin().read_to_end(&mut data).context("Error reading stdin")?;
+            let data = if args.json.is_some() {
+                serde_json::from_slice(&data).context("Error parsing set value as JSON")?
+            } else if args.binary.is_some() {
+                serde_json::to_value(&data).unwrap()
+            } else {
+                serde_json::Value::String(String::from_utf8(data).context("Error parsing value as UTF-8")?)
+            };
+            req(proto::ReqWrite(vec![(args.path, data)])).await?;
+        },
+        Command::WriteMove(args) => {
+            req(proto::ReqWriteMove {
                 from: args.from,
                 to: args.to,
                 overwrite: args.overwrite.is_some(),
             }).await?;
         },
-        Command::Generate(args) => {
-            let res = req(proto::ReqGenerate {
+        Command::WriteRevert(args) => {
+            req(proto::ReqWriteRevert {
+                paths: args.paths,
+                at: args.revision,
+            }).await?;
+        },
+        Command::WriteGenerate(args) => {
+            req(proto::ReqWriteGenerate {
                 path: args.path,
                 variant: match args.variant {
-                    GenerateVariant::Bytes { length } => C2SGenerateVariant::Bytes { length: length },
-                    GenerateVariant::SafeAlphanumeric { length } => C2SGenerateVariant::SafeAlphanumeric {
-                        length: length,
-                    },
-                    GenerateVariant::Alphanumeric { length } => C2SGenerateVariant::Alphanumeric { length: length },
-                    GenerateVariant::AlphanumericSymbols { length } => C2SGenerateVariant::AlphanumericSymbols {
-                        length: length,
-                    },
+                    GenerateVariant::Bytes(args) => C2SGenerateVariant::Bytes(
+                        C2SGenerateVariantBytes { length: args.length },
+                    ),
+                    GenerateVariant::SafeAlphanumeric(args) => C2SGenerateVariant::SafeAlphanumeric(
+                        C2SGenerateVariantSafeAlphanumeric { length: args.length },
+                    ),
+                    GenerateVariant::Alphanumeric(args) => C2SGenerateVariant::Alphanumeric(
+                        C2SGenerateVariantAlphanumeric { length: args.length },
+                    ),
+                    GenerateVariant::AlphanumericSymbols(args) => C2SGenerateVariant::AlphanumericSymbols(
+                        C2SGenerateVariantAlphanumericSymbols { length: args.length },
+                    ),
                     GenerateVariant::Pgp => C2SGenerateVariant::Pgp,
+                    GenerateVariant::Ssh => C2SGenerateVariant::Ssh,
                 },
                 overwrite: args.overwrite.is_some(),
             }).await?;
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
-        Command::PgpSign(args) => {
-            let res = req(proto::ReqPgpSign {
+        Command::DerivePgpSign(args) => {
+            let res = req(proto::ReqDerivePgpSign {
+                key: args.key,
+                data: args.data.value,
+            }).await?;
+            std::io::stdout().write_all(res.as_bytes()).unwrap();
+            std::io::stdout().flush().unwrap();
+        },
+        Command::DerivePgpDecrypt(args) => {
+            let res = req(proto::ReqDerivePgpDecrypt {
                 key: args.key,
                 data: args.data.value,
             }).await?;
             std::io::stdout().write_all(&res).unwrap();
             std::io::stdout().flush().unwrap();
         },
-        Command::PgpDecrypt(args) => {
-            let res = req(proto::ReqPgpDecrypt {
-                key: args.key,
-                data: args.data.value,
-            }).await?;
-            std::io::stdout().write_all(&res).unwrap();
+        Command::DeriveOtp(args) => {
+            let res = req(proto::ReqDeriveOtp { key: args.key }).await?;
+            std::io::stdout().write_all(res.as_bytes()).unwrap();
             std::io::stdout().flush().unwrap();
-        },
-        Command::ListRevisions(args) => {
-            let res = req(proto::ReqGetRevisions {
-                paths: args.paths,
-                at: args.at,
-            }).await?;
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
-        },
-        Command::Revert(args) => {
-            req(proto::ReqRevert {
-                paths: args.paths,
-                at: args.at,
-            }).await?;
         },
         Command::ScanCards => {
             let mut card_stream = CardStream::new(&log);

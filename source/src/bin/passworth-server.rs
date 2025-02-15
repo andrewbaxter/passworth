@@ -20,7 +20,10 @@ use {
         Aargvark,
     },
     chrono::Utc,
-    flowcontrol::shed,
+    flowcontrol::{
+        exenum,
+        shed,
+    },
     gtk4::{
         glib::LogLevels,
         prelude::ApplicationExtManual,
@@ -36,6 +39,7 @@ use {
     },
     passworth::{
         config,
+        crypto::pgp_from_armor,
         datapath::SpecificPath,
         generate,
         proto::{
@@ -57,9 +61,12 @@ use {
             Parse,
         },
         policy::StandardPolicy,
-        serialize::stream::{
-            Message,
-            Signer,
+        serialize::{
+            stream::{
+                Message,
+                Signer,
+            },
+            SerializeInto,
         },
         Cert,
     },
@@ -85,7 +92,10 @@ use {
             HashSet,
         },
         env,
-        io::Cursor,
+        io::{
+            Cursor,
+            Write,
+        },
         path::PathBuf,
         str::FromStr,
         sync::{
@@ -101,7 +111,6 @@ use {
         spawn,
         sync::{
             broadcast,
-            mpsc,
             oneshot,
             Notify,
         },
@@ -125,11 +134,8 @@ struct Args {
     validate: Option<()>,
 }
 
-fn bury(root: &mut Option<serde_json::Value>, path: &SpecificPath, value: serde_json::Value) {
-    if root.is_none() {
-        *root = Some(serde_json::Value::Null);
-    }
-    let mut at = root.as_mut().unwrap();
+fn bury(root: &mut serde_json::Value, path: &SpecificPath, value: serde_json::Value) {
+    let mut at = root;
     for seg in &path.0 {
         match &at {
             serde_json::Value::Object(_) => (),
@@ -137,11 +143,9 @@ fn bury(root: &mut Option<serde_json::Value>, path: &SpecificPath, value: serde_
                 *at = serde_json::Value::Object(serde_json::Map::new());
             },
         }
-        let serde_json::Value::Object(o) = at else {
-            panic!();
-        };
-        let res = o.entry(seg).or_insert(serde_json::Value::Null);
-        at = res;
+        let o = exenum!(at, serde_json:: Value:: Object(o) => o).unwrap();
+        let next = o.entry(seg).or_insert(serde_json::Value::Null);
+        at = next;
     }
     *at = value;
 }
@@ -189,31 +193,31 @@ async fn main2() -> Result<(), loga::Error> {
         )?;
 
     // Start fg thread
-    let (fg_tx, mut fg_rx) = mpsc::channel(100);
+    let (fg_tx, fg_rx) = std::sync::mpsc::channel();
     tm.critical_task("Foreground interactions", {
         let fg_state = Arc::new(FgState {
             log: log.fork(ea!(sys = "human")),
             last_prompts: Mutex::new(HashMap::new()),
         });
-        let work = {
+        let fg_state = fg_state.clone();
+        let tm = tm.clone();
+        let work = spawn_blocking({
             let tm = tm.clone();
-            async move {
+            move || {
                 loop {
-                    let Some(req) = fg_rx.recv().await else {
+                    let Ok(req) = fg_rx.recv() else {
                         break;
                     };
                     let req = RefCell::new(Some(req));
                     let tm = RefCell::new(Some(tm.clone()));
-
-                    // Start thread to run gtk, gtk event loop
-                    let fg_state = fg_state.clone();
-                    spawn_blocking(move || {
-                        let app =
-                            gtk4::Application::builder()
-                                .application_id("x.passworth")
-                                .flags(gtk4::gio::ApplicationFlags::FLAGS_NONE)
-                                .build();
-                        gtk4::gio::prelude::ApplicationExt::connect_activate(&app, move |app| {
+                    let app =
+                        gtk4::Application::builder()
+                            .application_id("x.passworth")
+                            .flags(gtk4::gio::ApplicationFlags::FLAGS_NONE)
+                            .build();
+                    gtk4::gio::prelude::ApplicationExt::connect_activate(&app, {
+                        let fg_state = fg_state.clone();
+                        move |app| {
                             let app = app.clone();
 
                             // Hack to work around `connect_activate` being `Fn` instead of `FnOnce`
@@ -247,18 +251,20 @@ async fn main2() -> Result<(), loga::Error> {
                                     };
                                 }
                             });
-                        });
-                        gtk4::prelude::ApplicationExtManual::run_with_args(&app, &[] as &[String]);
-                    }).await.unwrap();
+                        }
+                    });
+                    gtk4::prelude::ApplicationExtManual::run_with_args(&app, &[] as &[String]);
                 }
             }
-        };
-        let tm = tm.clone();
+        });
         async move {
             select!{
-                _ = work =>(),
-                _ = tm.until_terminate() =>()
-            };
+                w = work => {
+                    w?;
+                },
+                _ = tm.until_terminate() => {
+                }
+            }
             return Ok(());
         }
     });
@@ -274,8 +280,7 @@ async fn main2() -> Result<(), loga::Error> {
         privdb_path: PathBuf,
         root_factor: Arc<FactorTree>,
         token: Mutex<TokenState>,
-        fg_tx: mpsc::Sender<B2F>,
-        last_activity: Mutex<Instant>,
+        fg_tx: std::sync::mpsc::Sender<B2F>,
         lock_timeout: u64,
     }
 
@@ -300,7 +305,6 @@ async fn main2() -> Result<(), loga::Error> {
             token: None,
             wait_sub: None,
         }),
-        last_activity: Mutex::new(Instant::now()),
         lock_timeout: config.lock_timeout,
     });
 
@@ -430,7 +434,7 @@ async fn main2() -> Result<(), loga::Error> {
 
             // Skip if nothing changed
             let root_token_changed = factor_token_changed.contains(&root_factor.id);
-            if factor_state_changed.is_empty() && root_token_changed {
+            if factor_state_changed.is_empty() && !root_token_changed {
                 break 'priv_init_done;
             }
             let mut remove_state = prev_state.keys().cloned().collect::<Vec<_>>();
@@ -444,7 +448,7 @@ async fn main2() -> Result<(), loga::Error> {
                     privdb_path: state.privdb_path.clone(),
                     root_factor: prev_root_factor.clone(),
                     state: prev_state.clone(),
-                }, resp_tx)).await.ignore();
+                }, resp_tx)).ignore();
                 unlock_result =
                     resp_rx
                         .await?
@@ -462,7 +466,7 @@ async fn main2() -> Result<(), loga::Error> {
                 state_changed: factor_state_changed,
                 prev_state: prev_state,
                 prev_root_factor: Some(prev_root_factor),
-            }, resp_tx)).await.ignore();
+            }, resp_tx)).ignore();
             let init_result =
                 resp_rx
                     .await?
@@ -472,7 +476,6 @@ async fn main2() -> Result<(), loga::Error> {
             // Store the new config and tokens
             tx(pubdbc, move |txn| {
                 for k in &remove_state {
-                    eprintln!("CHANGE remove factor {}", k);
                     if !pubdb::factor_delete(txn, k)
                         .context_with("Error removing obsolete factor data", ea!(factor = k))?
                         .is_some() {
@@ -480,7 +483,6 @@ async fn main2() -> Result<(), loga::Error> {
                     }
                 }
                 for (k, v) in &init_result.store_state {
-                    eprintln!("CHANGE add factor {}", k);
                     pubdb::factor_add(txn, &k, &v).context_with("Error storing new factor data", ea!(factor = k))?;
                 }
                 pubdb::config_set(txn, &config::Config::V1(config))?;
@@ -514,7 +516,7 @@ async fn main2() -> Result<(), loga::Error> {
                 state_changed: all_factors.clone(),
                 prev_state: HashMap::new(),
                 prev_root_factor: None,
-            }, resp_tx)).await.ignore();
+            }, resp_tx)).ignore();
             let init_result =
                 resp_rx
                     .await?
@@ -524,7 +526,6 @@ async fn main2() -> Result<(), loga::Error> {
             // Store the new config and tokens
             tx(pubdbc, move |txn| {
                 for (k, v) in &init_result.store_state {
-                    eprintln!("NEW add factor {}", k);
                     pubdb::factor_add(txn, &k, &v).context_with("Error storing new factor data", ea!(factor = k))?;
                 }
                 pubdb::config_set(txn, &config::Config::V1(config))?;
@@ -587,7 +588,7 @@ async fn main2() -> Result<(), loga::Error> {
                         privdb_path: state.privdb_path.clone(),
                         root_factor: state.root_factor.clone(),
                         state: factor_state,
-                    }, fg_tx)).await.ignore();
+                    }, fg_tx)).ignore();
                     let res = fg_rx.await?.context("Error during fg unlock")?.context("User closed unlock window")?;
 
                     // Update shared token + return
@@ -629,15 +630,36 @@ async fn main2() -> Result<(), loga::Error> {
                     match async {
                         let peer = conn.0.peer_cred()?;
                         let pid = peer.pid().context("OS didn't provide PID for peer")?;
-                        let peer_meta = scan_principal(&log, pid).await?;
+                        let principal =
+                            scan_principal(&log, rules.any_match_systemd, rules.any_match_binary, pid).await?;
 
                         // Helpers for command processing
-                        let set = |txn: &mut rusqlite::Transaction, pairs: Vec<(SpecificPath, Option<serde_json::Value>)>| {
+                        fn set(txn: &mut rusqlite::Transaction, pairs: Vec<(SpecificPath, serde_json::Value)>) -> Result<(), loga::Error> {
                             let now = Utc::now();
                             for (mut path, value) in pairs {
                                 // Clear out everything above and below that would be shaded by this
-                                for row in privdb::values_get_above_below(txn, &path.to_string(), i64::MAX)? {
-                                    privdb::values_insert(txn, now, &row.path, None)?;
+                                if !path.0.is_empty() {
+                                    for i in 0 .. path.0.len() - 1 {
+                                        // If setting at `/a/b/c = { .. }` and a value exists at e.g. `/a = 4`
+                                        let parent_path = SpecificPath(path.0[..i].iter().cloned().collect()).to_string();
+                                        if privdb::values_get_exact(txn, &parent_path, i64::MAX)?
+                                            .filter(
+                                                |x| serde_json::from_str::<serde_json::Value>(&x.data).unwrap() !=
+                                                    serde_json::Value::Null,
+                                            )
+                                            .is_some() {
+                                            privdb::values_insert(
+                                                txn,
+                                                now,
+                                                &parent_path,
+                                                &serde_json::to_string(&serde_json::Value::Null).unwrap(),
+                                            )?;
+                                        }
+                                    }
+                                }
+                                for row in privdb::values_get(txn, &path.to_string(), i64::MAX)? {
+                                    // If setting at `/a/b/c` and a value exists at e.g. `/a/b/c/d`
+                                    privdb::values_insert(txn, now, &row.path, &serde_json::to_string(&serde_json::Value::Null).unwrap())?;
                                 }
 
                                 // Add the new data
@@ -647,10 +669,11 @@ async fn main2() -> Result<(), loga::Error> {
                                         if let Some(seg) = &seg {
                                             path.0.push(seg.clone());
                                         }
+                                        stack.push((seg, at.clone(), false));
                                         match &at {
-                                            Some(serde_json::Value::Object(o)) => {
+                                            serde_json::Value::Object(o) => {
                                                 for (k, v) in o {
-                                                    stack.push((Some(k.to_string()), Some(v.clone()), true));
+                                                    stack.push((Some(k.to_string()), v.clone(), true));
                                                 }
                                             },
                                             _ => {
@@ -658,15 +681,10 @@ async fn main2() -> Result<(), loga::Error> {
                                                     txn,
                                                     now,
                                                     &path.to_string(),
-                                                    at
-                                                        .as_ref()
-                                                        .map(|at| serde_json::to_string(&at).unwrap())
-                                                        .as_ref()
-                                                        .map(|x| x.as_str()),
+                                                    &serde_json::to_string(&at).unwrap(),
                                                 )?;
                                             },
                                         }
-                                        stack.push((seg, at, false));
                                     } else {
                                         if seg.is_some() {
                                             path.0.pop();
@@ -674,26 +692,30 @@ async fn main2() -> Result<(), loga::Error> {
                                     }
                                 }
                             }
-                            return Ok(()) as Result<_, loga::Error>;
-                        };
-                        let get =
-                            |txn: &mut rusqlite::Transaction, path: &SpecificPath, at: Option<i64>| ->
-                                Result<Option<serde_json::Value>, loga::Error> {
-                                let mut root = None;
-                                for row in privdb::values_get(txn, &path.to_string(), at.unwrap_or(i64::MAX))? {
-                                    let Some(row_data) = row.data else {
-                                        continue;
-                                    };
-                                    bury(
-                                        &mut root,
-                                        &SpecificPath(
-                                            SpecificPath::from_str(&row.path).unwrap().0.split_off(path.0.len()),
-                                        ),
-                                        serde_json::from_str::<serde_json::Value>(&row_data).unwrap(),
-                                    );
+                            return Ok(());
+                        }
+
+                        fn get(
+                            txn: &mut rusqlite::Transaction,
+                            path: &SpecificPath,
+                            at: Option<i64>,
+                        ) -> Result<serde_json::Value, loga::Error> {
+                            let mut root = serde_json::Value::Null;
+                            for row in privdb::values_get(txn, &path.to_string(), at.unwrap_or(i64::MAX))? {
+                                let data = serde_json::from_str::<serde_json::Value>(&row.data).unwrap();
+                                if data == serde_json::Value::Null {
+                                    continue;
                                 }
-                                return Ok(root);
-                            };
+                                bury(
+                                    &mut root,
+                                    &SpecificPath(
+                                        SpecificPath::from_str(&row.path).unwrap().0.split_off(path.0.len()),
+                                    ),
+                                    data,
+                                );
+                            }
+                            return Ok(root);
+                        }
 
                         // Process request
                         while let Some(req) = conn.recv_req().await.map_err(loga::err)? {
@@ -705,59 +727,209 @@ async fn main2() -> Result<(), loga::Error> {
                             match async {
                                 let resp;
                                 match req {
-                                    proto::msg::ServerReq::Unlock(rr, _req) => {
+                                    proto::msg::ServerReq::Lock(rr, req) => {
                                         if !permission::permit(
+                                            &log,
                                             state.fg_tx.clone(),
-                                            &rules,
-                                            &peer_meta,
+                                            &rules.tree,
+                                            &principal,
                                             &[SpecificPath(vec!["".to_string()])],
                                         )
                                             .await?
                                             .lock {
                                             return resp_unauthorized();
                                         }
-                                        get_privdb(&state).await?;
+                                        match req.0 {
+                                            proto::LockAction::Lock => {
+                                                state.token.lock().unwrap().token = None;
+                                            },
+                                            proto::LockAction::Unlock => {
+                                                get_privdb(&state).await?;
+                                                activity.notify_one();
+                                            },
+                                        }
+                                        resp = rr(());
+                                    },
+                                    proto::msg::ServerReq::MetaKeys(rr, req) => {
+                                        if !permission::permit(
+                                            &log,
+                                            state.fg_tx.clone(),
+                                            &rules.tree,
+                                            &principal,
+                                            &req.paths,
+                                        )
+                                            .await?
+                                            .meta {
+                                            return resp_unauthorized();
+                                        }
+                                        let tree = tx(get_privdb(&state).await?, move |txn| {
+                                            let mut root0 = serde_json::Value::Null;
+                                            for path in &req.paths {
+                                                let mut root = serde_json::Value::Null;
+                                                for row in privdb::values_get(
+                                                    txn,
+                                                    &path.to_string(),
+                                                    req.at.unwrap_or(i64::MAX),
+                                                )? {
+                                                    let data =
+                                                        serde_json::from_str::<serde_json::Value>(
+                                                            &row.data,
+                                                        ).unwrap();
+                                                    if data == serde_json::Value::Null {
+                                                        continue;
+                                                    }
+                                                    bury(
+                                                        &mut root,
+                                                        &SpecificPath(
+                                                            SpecificPath::from_str(&row.path)
+                                                                .unwrap()
+                                                                .0
+                                                                .split_off(path.0.len()),
+                                                        ),
+                                                        serde_json::Value::Null,
+                                                    );
+                                                }
+                                                bury(&mut root0, &path, root);
+                                            }
+                                            return Ok(root0);
+                                        }).await?;
                                         activity.notify_one();
-                                        resp = rr(());
+                                        resp = rr(serde_json::to_value(&tree).unwrap());
                                     },
-                                    proto::msg::ServerReq::Lock(rr, _req) => {
+                                    proto::msg::ServerReq::MetaRevisions(rr, req) => {
                                         if !permission::permit(
+                                            &log,
                                             state.fg_tx.clone(),
-                                            &rules,
-                                            &peer_meta,
-                                            &[SpecificPath(vec!["".to_string()])],
+                                            &rules.tree,
+                                            &principal,
+                                            &req.paths,
                                         )
                                             .await?
-                                            .lock {
+                                            .meta {
                                             return resp_unauthorized();
                                         }
-                                        state.token.lock().unwrap().token = None;
-                                        resp = rr(());
+                                        let mut privdbc = get_privdb(&state).await?;
+                                        let db_resp = spawn_blocking(move || {
+                                            let mut root = serde_json::Value::Null;
+                                            for path in req.paths {
+                                                for row in privdb::values_get(
+                                                    &mut privdbc,
+                                                    &path.to_string(),
+                                                    req.at.map(|x| x as i64).unwrap_or(i64::MAX),
+                                                )? {
+                                                    let data =
+                                                        serde_json::from_str::<serde_json::Value>(
+                                                            &row.data,
+                                                        ).unwrap();
+                                                    bury(
+                                                        &mut root,
+                                                        &SpecificPath(
+                                                            SpecificPath::from_str(&row.path)
+                                                                .unwrap()
+                                                                .0
+                                                                .into_iter()
+                                                                .flat_map(|x| ["children".to_string(), x])
+                                                                .collect(),
+                                                        ),
+                                                        json!({
+                                                            "exists": data != serde_json:: Value:: Null,
+                                                            "rev_id": row.rev_id,
+                                                            "rev_stamp": row.rev_stamp.to_rfc3339(),
+                                                        }),
+                                                    );
+                                                }
+                                            }
+                                            return Ok(root) as Result<_, loga::Error>;
+                                        }).await??;
+                                        activity.notify_one();
+                                        resp = rr(db_resp);
                                     },
-                                    proto::msg::ServerReq::Get(rr, req) => {
-                                        if !permission::permit(state.fg_tx.clone(), &rules, &peer_meta, &req.paths)
+                                    proto::msg::ServerReq::MetaPgpPubkey(rr, req) => {
+                                        if !permission::permit(
+                                            &log,
+                                            state.fg_tx.clone(),
+                                            &rules.tree,
+                                            &principal,
+                                            &vec![req.path.clone()],
+                                        )
+                                            .await?
+                                            .meta {
+                                            return resp_unauthorized();
+                                        }
+                                        let db_key = tx(get_privdb(&state).await?, move |txn| {
+                                            return Ok(get(txn, &req.path, None)?);
+                                        }).await?;
+                                        let serde_json::Value::String(key) = db_key else {
+                                            return Err(loga::err("No value at path or value is not a string"));
+                                        };
+                                        resp =
+                                            rr(
+                                                String::from_utf8(
+                                                    pgp_from_armor(&key)?
+                                                        .armored()
+                                                        .to_vec()
+                                                        .map_err(loga::err)
+                                                        .context("Error serializing ascii-armored pgp cert")?,
+                                                ).unwrap(),
+                                            );
+                                        activity.notify_one();
+                                    },
+                                    proto::msg::ServerReq::MetaSshPubkey(rr, req) => {
+                                        if !permission::permit(
+                                            &log,
+                                            state.fg_tx.clone(),
+                                            &rules.tree,
+                                            &principal,
+                                            &vec![req.path.clone()],
+                                        )
+                                            .await?
+                                            .meta {
+                                            return resp_unauthorized();
+                                        }
+                                        let db_key = tx(get_privdb(&state).await?, move |txn| {
+                                            return Ok(get(txn, &req.path, None)?);
+                                        }).await?;
+                                        let serde_json::Value::String(key) = db_key else {
+                                            return Err(loga::err("No value at path or value is not a string"));
+                                        };
+                                        resp =
+                                            rr(
+                                                ssh_key::PrivateKey::from_openssh(&key)
+                                                    .context("Error reading data at path as openssh private key PEM")?
+                                                    .public_key()
+                                                    .to_openssh()
+                                                    .context("Error encoding ssh public key as openssh PEM")?,
+                                            );
+                                        activity.notify_one();
+                                    },
+                                    proto::msg::ServerReq::Read(rr, req) => {
+                                        if !permission::permit(
+                                            &log,
+                                            state.fg_tx.clone(),
+                                            &rules.tree,
+                                            &principal,
+                                            &req.paths,
+                                        )
                                             .await?
                                             .read {
                                             return resp_unauthorized();
                                         }
                                         let tree = tx(get_privdb(&state).await?, move |txn| {
-                                            let mut root = None;
+                                            let mut root = serde_json::Value::Null;
                                             for path in &req.paths {
-                                                let Some(data) = get(txn, path, req.at)? else {
-                                                    continue;
-                                                };
-                                                bury(&mut root, &path, data);
+                                                bury(&mut root, &path, get(txn, path, req.at)?);
                                             }
                                             return Ok(root);
                                         }).await?;
                                         activity.notify_one();
                                         resp = rr(serde_json::to_value(&tree).unwrap());
                                     },
-                                    proto::msg::ServerReq::Set(rr, req) => {
+                                    proto::msg::ServerReq::Write(rr, req) => {
                                         if !permission::permit(
+                                            &log,
                                             state.fg_tx.clone(),
-                                            &rules,
-                                            &peer_meta,
+                                            &rules.tree,
+                                            &principal,
                                             &req.0.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(),
                                         )
                                             .await?
@@ -765,17 +937,18 @@ async fn main2() -> Result<(), loga::Error> {
                                             return resp_unauthorized();
                                         }
                                         tx(get_privdb(&state).await?, move |txn| {
-                                            set(txn, req.0.into_iter().map(|(k, v)| (k, Some(v))).collect())?;
+                                            set(txn, req.0)?;
                                             return Ok(());
                                         }).await?;
                                         activity.notify_one();
                                         resp = rr(());
                                     },
-                                    proto::msg::ServerReq::Move(rr, req) => {
+                                    proto::msg::ServerReq::WriteMove(rr, req) => {
                                         if !permission::permit(
+                                            &log,
                                             state.fg_tx.clone(),
-                                            &rules,
-                                            &peer_meta,
+                                            &rules.tree,
+                                            &principal,
                                             &[req.from.clone(), req.to.clone()],
                                         )
                                             .await?
@@ -783,7 +956,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             return resp_unauthorized();
                                         }
                                         tx(get_privdb(&state).await?, move |txn| {
-                                            if get(txn, &req.from, None)?.is_some() && !req.overwrite {
+                                            if get(txn, &req.to, None)? != serde_json::Value::Null && !req.overwrite {
                                                 return Err(
                                                     loga::err(
                                                         "Attempt to move over existing value with overwrite off",
@@ -791,62 +964,56 @@ async fn main2() -> Result<(), loga::Error> {
                                                 );
                                             }
                                             let data = get(txn, &req.from, None)?;
-                                            set(txn, vec![(req.from, None), (req.to, data)])?;
+                                            set(txn, vec![(req.from, serde_json::Value::Null), (req.to, data)])?;
                                             return Ok(());
                                         }).await?;
                                         activity.notify_one();
                                         resp = rr(());
                                     },
-                                    proto::msg::ServerReq::Generate(rr, req) => {
+                                    proto::msg::ServerReq::WriteGenerate(rr, req) => {
                                         if !permission::permit(
+                                            &log,
                                             state.fg_tx.clone(),
-                                            &rules,
-                                            &peer_meta,
+                                            &rules.tree,
+                                            &principal,
                                             &[req.path.clone()],
                                         )
                                             .await?
                                             .write {
                                             return resp_unauthorized();
                                         }
-                                        let db_resp = tx(get_privdb(&state).await?, move |txn| {
-                                            if get(txn, &req.path, None)?.is_some() && !req.overwrite {
+                                        tx(get_privdb(&state).await?, move |txn| {
+                                            if get(txn, &req.path, None)? != serde_json::Value::Null &&
+                                                !req.overwrite {
                                                 return Err(
                                                     loga::err("Destructive command but flag to allow not specified"),
                                                 );
                                             }
-                                            let res_data;
                                             let data;
                                             match req.variant {
-                                                passworth::proto::C2SGenerateVariant::Bytes { length } => {
-                                                    data =
-                                                        serde_json::to_value(&generate::gen_bytes(length)).unwrap();
-                                                    res_data = "".to_string();
-                                                },
-                                                passworth::proto::C2SGenerateVariant::SafeAlphanumeric { length } => {
+                                                passworth::proto::C2SGenerateVariant::Bytes(args) => {
                                                     data =
                                                         serde_json::to_value(
-                                                            generate::gen_safe_alphanum(length),
+                                                            &generate::gen_bytes(args.length),
                                                         ).unwrap();
-                                                    res_data = "".to_string();
                                                 },
-                                                passworth::proto::C2SGenerateVariant::Alphanumeric { length } => {
+                                                passworth::proto::C2SGenerateVariant::SafeAlphanumeric(args) => {
                                                     data =
                                                         serde_json::to_value(
-                                                            generate::gen_alphanum(length),
+                                                            generate::gen_safe_alphanum(args.length),
                                                         ).unwrap();
-                                                    res_data = "".to_string();
                                                 },
-                                                passworth
-                                                ::proto
-                                                ::C2SGenerateVariant
-                                                ::AlphanumericSymbols {
-                                                    length,
-                                                } => {
+                                                passworth::proto::C2SGenerateVariant::Alphanumeric(args) => {
                                                     data =
                                                         serde_json::to_value(
-                                                            generate::gen_alphanum_symbols(length),
+                                                            generate::gen_alphanum(args.length),
                                                         ).unwrap();
-                                                    res_data = "".to_string();
+                                                },
+                                                passworth::proto::C2SGenerateVariant::AlphanumericSymbols(args) => {
+                                                    data =
+                                                        serde_json::to_value(
+                                                            generate::gen_alphanum_symbols(args.length),
+                                                        ).unwrap();
                                                 },
                                                 passworth::proto::C2SGenerateVariant::Pgp => {
                                                     let (cert, _) =
@@ -873,9 +1040,6 @@ async fn main2() -> Result<(), loga::Error> {
                                                         )
                                                             .map_err(|e| loga::err(e.to_string()))
                                                             .context("Error serializing public key")?;
-                                                        res_data = unsafe {
-                                                            String::from_utf8_unchecked(bytes)
-                                                        };
                                                     }
                                                     {
                                                         let mut w =
@@ -889,26 +1053,68 @@ async fn main2() -> Result<(), loga::Error> {
                                                                     .collect::<Vec<_>>(),
                                                             )?;
                                                         sequoia_openpgp::serialize::Serialize::serialize(
-                                                            &cert.as_tsk(),
+                                                            &cert.as_tsk().armored(),
                                                             &mut w,
                                                         )
                                                             .map_err(|e| loga::err(e.to_string()))
                                                             .context("Error serializing private key")?;
-                                                        data = serde_json::to_value(&w.finalize()?).unwrap();
+                                                        data =
+                                                            serde_json::Value::String(
+                                                                String::from_utf8(w.finalize()?).unwrap(),
+                                                            );
                                                     }
                                                 },
+                                                passworth::proto::C2SGenerateVariant::Ssh => {
+                                                    let key =
+                                                        ssh_key::PrivateKey::random(
+                                                            &mut ssh_key::rand_core::OsRng,
+                                                            ssh_key::Algorithm::default(),
+                                                        ).context("Error generating ssh key")?;
+                                                    data =
+                                                        serde_json::Value::String(
+                                                            key
+                                                                .to_openssh(Default::default())
+                                                                .context(
+                                                                    "Error encoding ssh key in openssh PEM format",
+                                                                )?
+                                                                .to_string(),
+                                                        );
+                                                },
                                             };
-                                            set(txn, vec![(req.path, Some(data))])?;
-                                            return Ok(res_data);
+                                            set(txn, vec![(req.path, data)])?;
+                                            return Ok(());
                                         }).await?;
                                         activity.notify_one();
-                                        resp = rr(db_resp);
+                                        resp = rr(());
                                     },
-                                    proto::msg::ServerReq::PgpSign(rr, req) => {
+                                    proto::msg::ServerReq::WriteRevert(rr, req) => {
                                         if !permission::permit(
+                                            &log,
                                             state.fg_tx.clone(),
-                                            &rules,
-                                            &peer_meta,
+                                            &rules.tree,
+                                            &principal,
+                                            &req.paths,
+                                        )
+                                            .await?
+                                            .write {
+                                            return resp_unauthorized();
+                                        }
+                                        tx(get_privdb(&state).await?, move |txn| {
+                                            for path in req.paths {
+                                                let data = get(txn, &path, Some(req.at))?;
+                                                set(txn, vec![(path, data)])?;
+                                            }
+                                            return Ok(()) as Result<_, loga::Error>;
+                                        }).await?;
+                                        activity.notify_one();
+                                        resp = rr(());
+                                    },
+                                    proto::msg::ServerReq::DerivePgpSign(rr, req) => {
+                                        if !permission::permit(
+                                            &log,
+                                            state.fg_tx.clone(),
+                                            &rules.tree,
+                                            &principal,
                                             &[req.key.clone()],
                                         )
                                             .await?
@@ -918,16 +1124,14 @@ async fn main2() -> Result<(), loga::Error> {
                                         let db_key = tx(get_privdb(&state).await?, move |txn| {
                                             return Ok(get(txn, &req.key, None)?);
                                         }).await?;
-                                        let Some(serde_json::Value::String(key)) = db_key else {
+                                        let serde_json::Value::String(key) = db_key else {
                                             return Err(loga::err("No value at path or value is not a string"));
                                         };
                                         let mut signed = vec![];
                                         let mut signer =
                                             Signer::with_template(
                                                 Message::new(&mut signed),
-                                                Cert::from_str(&key)
-                                                    .map_err(loga::err)
-                                                    .context("Error loading data at path as pgp cert")?
+                                                pgp_from_armor(&key)?
                                                     .keys()
                                                     .secret()
                                                     .with_policy(&StandardPolicy::new(), None)
@@ -953,14 +1157,31 @@ async fn main2() -> Result<(), loga::Error> {
                                             &mut signer,
                                         ).context("Error signing data")?;
                                         signer.finalize().map_err(loga::err).context("Error finishing signature")?;
+                                        let mut armorer =
+                                            sequoia_openpgp::armor::Writer::new(
+                                                Vec::new(),
+                                                sequoia_openpgp::armor::Kind::Signature,
+                                            ).context("Error instantiating gpg armorer")?;
+                                        armorer
+                                            .write_all(&signed)
+                                            .map_err(loga::err)
+                                            .context("Error writing signature to ascii-armorer")?;
+                                        resp =
+                                            rr(
+                                                String::from_utf8(
+                                                    armorer
+                                                        .finalize()
+                                                        .context("Error finalizing gpg armor on signature")?,
+                                                ).unwrap(),
+                                            );
                                         activity.notify_one();
-                                        resp = rr(signed);
                                     },
-                                    proto::msg::ServerReq::PgpDecrypt(rr, req) => {
+                                    proto::msg::ServerReq::DerivePgpDecrypt(rr, req) => {
                                         if !permission::permit(
+                                            &log,
                                             state.fg_tx.clone(),
-                                            &rules,
-                                            &peer_meta,
+                                            &rules.tree,
+                                            &principal,
                                             &[req.key.clone()],
                                         )
                                             .await?
@@ -970,7 +1191,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         let db_key = tx(get_privdb(&state).await?, move |txn| {
                                             return Ok(get(txn, &req.key, None)?);
                                         }).await?;
-                                        let Some(serde_json::Value::String(key)) = db_key else {
+                                        let serde_json::Value::String(key) = db_key else {
                                             return Err(loga::err("No value at path or value is not a string"));
                                         };
                                         let mut decrypted = vec![];
@@ -1050,15 +1271,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             DecryptorBuilder::from_bytes(&req.data)
                                                 .map_err(loga::err)
                                                 .context("Error creating decryptor from data to decrypt")?
-                                                .with_policy(
-                                                    &policy,
-                                                    None,
-                                                    Helper(
-                                                        Cert::from_str(&key)
-                                                            .map_err(loga::err)
-                                                            .context("Error creating pgp cert from data at path")?,
-                                                    ),
-                                                )
+                                                .with_policy(&policy, None, Helper(pgp_from_armor(&key)?))
                                                 .map_err(loga::err)
                                                 .context("Error matching cert to data to decrypt")?;
                                         std::io::copy(&mut decryptor, &mut Cursor::new(&mut decrypted))
@@ -1067,54 +1280,30 @@ async fn main2() -> Result<(), loga::Error> {
                                         activity.notify_one();
                                         resp = rr(decrypted);
                                     },
-                                    proto::msg::ServerReq::GetRevisions(rr, req) => {
-                                        if !permission::permit(state.fg_tx.clone(), &rules, &peer_meta, &req.paths)
+                                    proto::msg::ServerReq::DeriveOtp(rr, req) => {
+                                        if !permission::permit(
+                                            &log,
+                                            state.fg_tx.clone(),
+                                            &rules.tree,
+                                            &principal,
+                                            &[req.key.clone()],
+                                        )
                                             .await?
-                                            .read {
+                                            .derive {
                                             return resp_unauthorized();
                                         }
-                                        let mut privdbc = get_privdb(&state).await?;
-                                        let db_resp = spawn_blocking(move || {
-                                            let mut root = Some(serde_json::Value::Null);
-                                            for path in req.paths {
-                                                for row in privdb::values_get(
-                                                    &mut privdbc,
-                                                    &path.to_string(),
-                                                    req.at.map(|x| x as i64).unwrap_or(i64::MAX),
-                                                )? {
-                                                    if row.data.is_none() {
-                                                        continue;
-                                                    }
-                                                    bury(
-                                                        &mut root,
-                                                        &SpecificPath::from_str(&row.path).unwrap(),
-                                                        json!({
-                                                            "rev_id": row.rev_id,
-                                                            "rev_stamp": row.rev_stamp.to_rfc3339(),
-                                                        }),
-                                                    );
-                                                }
-                                            }
-                                            return Ok(root.unwrap()) as Result<_, loga::Error>;
-                                        }).await??;
-                                        activity.notify_one();
-                                        resp = rr(db_resp);
-                                    },
-                                    proto::msg::ServerReq::Revert(rr, req) => {
-                                        if !permission::permit(state.fg_tx.clone(), &rules, &peer_meta, &req.paths)
-                                            .await?
-                                            .write {
-                                            return resp_unauthorized();
-                                        }
-                                        tx(get_privdb(&state).await?, move |txn| {
-                                            for path in req.paths {
-                                                let data = get(txn, &path, Some(req.at))?;
-                                                set(txn, vec![(path, data)])?;
-                                            }
-                                            return Ok(()) as Result<_, loga::Error>;
+                                        let otp_url = tx(get_privdb(&state).await?, move |txn| {
+                                            return Ok(get(txn, &req.key, None)?);
                                         }).await?;
-                                        activity.notify_one();
-                                        resp = rr(());
+                                        let serde_json::Value::String(otp_url) = otp_url else {
+                                            return Err(loga::err("No value at path or value is not a string"));
+                                        };
+                                        let otp =
+                                            totp_rs::TOTP::from_url(
+                                                &otp_url,
+                                            ).context("Failed to parse OTP url at path")?;
+                                        let token = otp.generate_current().context("Error generating OTP token")?;
+                                        resp = rr(token);
                                     },
                                 }
                                 return Ok(resp);
@@ -1155,7 +1344,7 @@ async fn main2() -> Result<(), loga::Error> {
                         return Ok(());
                     }
                     _ = activity.notified() => {
-                        next = Some(*state.last_activity.lock().unwrap() + Duration::from_secs(state.lock_timeout));
+                        next = Some(Instant::now() + Duration::from_secs(state.lock_timeout));
                     }
                     _ = async {
                         sleep_until(next.take().unwrap()).await

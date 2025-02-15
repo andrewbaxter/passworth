@@ -12,11 +12,14 @@ use {
         ResultContext,
     },
     passworth::{
-        config::latest::{
-            ConfigPermissionRule,
-            ConfigPrompt,
-            MatchBinary,
-            UserGroupId,
+        config::{
+            latest::{
+                ConfigPermissionRule,
+                ConfigPrompt,
+                MatchBinary,
+                UserGroupId,
+            },
+            v1::PermitLevel,
         },
         datapath::{
             GlobPath,
@@ -38,10 +41,7 @@ use {
             read,
             read_link,
         },
-        sync::{
-            mpsc,
-            oneshot,
-        },
+        sync::oneshot,
     },
     users::{
         Groups,
@@ -50,37 +50,51 @@ use {
     },
 };
 
+#[derive(Debug)]
 pub struct RuleMatchUser {
     pub user_id: Option<u32>,
     pub group_id: Option<u32>,
     pub walk_ancestors: bool,
 }
 
+#[derive(Debug)]
 pub struct Rule {
     pub id: usize,
     pub match_systemd: Option<String>,
     pub match_user: Option<RuleMatchUser>,
     pub match_binary: Option<MatchBinary>,
-    pub permit_lock: bool,
-    pub permit_derive: bool,
-    pub permit_read: bool,
-    pub permit_write: bool,
+    pub permit: PermitLevel,
     pub prompt: Option<ConfigPrompt>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct RuleTree {
     pub rules: Vec<Arc<Rule>>,
     pub wildcard: Option<Box<RuleTree>>,
     pub children: HashMap<String, RuleTree>,
 }
 
+#[derive(Clone)]
+pub struct RuleTreeRoot {
+    pub tree: Arc<RuleTree>,
+    pub any_match_systemd: bool,
+    pub any_match_binary: bool,
+}
+
 pub fn build_rule_tree(
     users: &UsersCache,
     config_rules: &[ConfigPermissionRule],
-) -> Result<Arc<RuleTree>, loga::Error> {
+) -> Result<RuleTreeRoot, loga::Error> {
     let mut rules = RuleTree::default();
+    let mut any_match_systemd = false;
+    let mut any_match_binary = false;
     for (id, rule) in config_rules.iter().enumerate() {
+        if rule.match_systemd.is_some() {
+            any_match_systemd = true;
+        }
+        if rule.match_binary.is_some() {
+            any_match_binary = true;
+        }
         let out_rule = Arc::new(Rule {
             id: id,
             match_binary: rule.match_binary.clone(),
@@ -111,10 +125,7 @@ pub fn build_rule_tree(
                 }),
                 None => None,
             },
-            permit_derive: rule.permit_derive,
-            permit_lock: rule.permit_lock,
-            permit_read: rule.permit_read,
-            permit_write: rule.permit_write,
+            permit: rule.permit,
             prompt: rule.prompt.clone(),
         });
         for path in &rule.paths {
@@ -133,10 +144,15 @@ pub fn build_rule_tree(
             at.rules.push(out_rule.clone());
         }
     }
-    return Ok(Arc::new(rules));
+    return Ok(RuleTreeRoot {
+        tree: Arc::new(rules),
+        any_match_systemd: any_match_systemd,
+        any_match_binary: any_match_binary,
+    });
 }
 
 pub struct PrincipalMetaProc {
+    pid: i32,
     uid: Option<u32>,
     gid: Option<u32>,
     systemd: Option<String>,
@@ -147,55 +163,72 @@ pub struct PrincipalMeta {
     chain: Vec<PrincipalMetaProc>,
 }
 
-pub async fn scan_principal(log: &Log, pid: i32) -> Result<PrincipalMeta, loga::Error> {
+pub async fn scan_principal(
+    log: &Log,
+    scan_systemd: bool,
+    scan_binary: bool,
+    pid: i32,
+) -> Result<PrincipalMeta, loga::Error> {
     // Get list of current systemd services for auth rule matching
     let mut service_pids = HashMap::new();
-    {
-        let mut command = tokio::process::Command::new("systemctl");
-        command.args(["*", "--type", "service", "--properties", "ID,ExecMainPID"]);
-        let log = log.fork(ea!(command = command.dbg_str()));
-        let res = command.output().await?;
-        if !res.status.success() {
-            return Err(
-                loga::err_with("Error listing current systemd service PIDs", ea!(output = res.pretty_dbg_str())),
-            );
-        }
-        let mut pid = None;
-        let mut name = None;
-        for line in res.stdout.split(|x| *x == b'\n') {
-            if line.is_empty() {
-                if let Some((pid, name)) = pid.zip(name) {
-                    service_pids.insert(pid, name);
-                }
-                pid = None;
-                name = None;
-                continue;
+    if scan_systemd {
+        shed!{
+            let mut command = tokio::process::Command::new("systemctl");
+            command.args(["show", "*", "--type", "service", "--property", "Id,ExecMainPID"]);
+            let log = log.fork(ea!(command = command.dbg_str()));
+            let res = command.output().await?;
+            if !res.status.success() {
+                log.log_with(
+                    loga::WARN,
+                    "Error listing current systemd service PIDs",
+                    ea!(output = res.pretty_dbg_str()),
+                );
+                break;
             }
-            let log = log.fork(ea!(line = String::from_utf8_lossy(&line)));
-            let mut splits = line.splitn(2, |x| *x == b'=');
-            let Some((key, value)) = splits.next().zip(splits.next()) else {
-                log.log_err(loga::WARN, loga::err("Non KV line in systemd service PID list output"));
-                continue;
-            };
-            match key {
-                b"ExecMainPID" => {
-                    let pid0 = match i32::from_str_radix(&String::from_utf8_lossy(&value), 10) {
-                        Ok(x) => x,
-                        Err(e) => {
-                            log.log_err(loga::WARN, e.context("Found unparsable PID in systemd service PID list"));
-                            continue;
-                        },
-                    };
-                    pid = Some(pid0)
-                },
-                b"ID" => name = Some(String::from_utf8_lossy(&value).to_string()),
-                _ => {
-                    log.log(loga::WARN, "Got invalid line in systemd service PID list");
+            let mut pid = None;
+            let mut name = None;
+            for line in res.stdout.split(|x| *x == b'\n') {
+                if line.is_empty() {
+                    if let Some((pid, name)) = pid.zip(name) {
+                        service_pids.insert(pid, name);
+                    }
+                    pid = None;
+                    name = None;
                     continue;
-                },
+                }
+                let log = log.fork(ea!(line = String::from_utf8_lossy(&line)));
+                let mut splits = line.splitn(2, |x| *x == b'=');
+                let Some((key, value)) = splits.next().zip(splits.next()) else {
+                    log.log_err(loga::WARN, loga::err("Non KV line in systemd service PID list output"));
+                    continue;
+                };
+                match key {
+                    b"ExecMainPID" => {
+                        let pid0 = match i32::from_str_radix(&String::from_utf8_lossy(&value), 10) {
+                            Ok(x) => x,
+                            Err(e) => {
+                                log.log_err(
+                                    loga::WARN,
+                                    e.context("Found unparsable PID in systemd service PID list"),
+                                );
+                                continue;
+                            },
+                        };
+                        pid = Some(pid0)
+                    },
+                    b"ID" => name = Some(String::from_utf8_lossy(&value).to_string()),
+                    _ => {
+                        log.log(loga::WARN, "Got invalid line in systemd service PID list");
+                        continue;
+                    },
+                }
+            }
+            if let Some((pid, name)) = pid.zip(name) {
+                service_pids.insert(pid, name);
             }
         }
     }
+    log.log(loga::DEBUG, format!("Scan principal: systemd PIDs: {:?}", service_pids));
 
     // Get peer pid chain
     let mut trunk = vec![];
@@ -267,42 +300,66 @@ pub async fn scan_principal(log: &Log, pid: i32) -> Result<PrincipalMeta, loga::
         }
 
         // Build meta chain entry
-        let binary = match async {
-            let exe_rel = read_link(proc_path.join("exe")).await.context("Unable to read proc exe link")?;
-            let root_exe = match tokio::fs::metadata(&exe_rel).await {
+        let binary = if scan_binary {
+            match async {
+                let exe_path = proc_path.join("exe");
+                let exe_rel =
+                    read_link(&exe_path)
+                        .await
+                        .context_with("Unable to read proc exe link", ea!(path = exe_path.dbg_str()))?;
+                let root_exe = match tokio::fs::metadata(&exe_rel).await {
+                    Ok(x) => x,
+                    Err(e) => {
+                        if e.kind() == ErrorKind::NotFound {
+                            return Ok(None);
+                        }
+                        return Err(e.context_with("Error reading exe meta on root", ea!(path = exe_rel.dbg_str())));
+                    },
+                };
+                let proc_path = proc_path.join("root").join(&exe_rel);
+                let proc_exe = match tokio::fs::metadata(&proc_path).await {
+                    Ok(x) => x,
+                    Err(e) => {
+                        if e.kind() == ErrorKind::NotFound {
+                            return Ok(None);
+                        }
+                        return Err(
+                            e.context_with(
+                                "Error reading exe meta within proc mount",
+                                ea!(path = proc_path.dbg_str()),
+                            ),
+                        );
+                    },
+                };
+
+                // Permissions are based on binaries in root namespace; confirm binary is the same
+                // as the one on root or else treat as unknown
+                if root_exe.dev() == proc_exe.dev() {
+                    return Ok(Some(exe_rel));
+                } else {
+                    return Ok(None);
+                }
+            }.await {
                 Ok(x) => x,
                 Err(e) => {
-                    if e.kind() == ErrorKind::NotFound {
-                        return Ok(None);
-                    }
-                    return Err(e.context("Error reading exe meta on root"));
+                    log.log_err(loga::WARN, e.context("Unable to read proc exe link"));
+                    None
                 },
-            };
-            let proc_exe = match tokio::fs::metadata(proc_path.join("root").join(&exe_rel)).await {
-                Ok(x) => x,
-                Err(e) => {
-                    if e.kind() == ErrorKind::NotFound {
-                        return Ok(None);
-                    }
-                    return Err(e.context("Error reading exe meta within proc mount"));
-                },
-            };
-            if root_exe.dev() == proc_exe.dev() {
-                return Ok(Some(exe_rel));
-            } else {
-                return Ok(None);
             }
-        }.await {
-            Ok(x) => x,
-            Err(e) => {
-                log.log_err(loga::WARN, e.context("Unable to read proc exe link"));
-                None
-            },
+        } else {
+            None
         };
+        let systemd = service_pids.get(&at).cloned();
+        log.log_with(
+            loga::DEBUG,
+            format!("Scan principal: scan PID {}", at),
+            ea!(uid = uid.dbg_str(), gid = gid.dbg_str(), systemd = systemd.dbg_str(), binary = binary.dbg_str()),
+        );
         trunk.push(PrincipalMetaProc {
+            pid: at,
             uid: uid,
             gid: gid,
-            systemd: service_pids.get(&at).cloned(),
+            systemd: systemd,
             binary: binary,
         });
 
@@ -318,18 +375,21 @@ pub async fn scan_principal(log: &Log, pid: i32) -> Result<PrincipalMeta, loga::
 
 pub struct Perms {
     pub lock: bool,
+    pub meta: bool,
     pub derive: bool,
     pub read: bool,
     pub write: bool,
 }
 
 pub async fn permit(
-    fg_tx: mpsc::Sender<B2F>,
+    log: &Log,
+    fg_tx: std::sync::mpsc::Sender<B2F>,
     rules: &RuleTree,
     principal: &PrincipalMeta,
     paths: &[SpecificPath],
 ) -> Result<Perms, loga::Error> {
     let mut total_lock = true;
+    let mut total_meta = true;
     let mut total_derive = true;
     let mut total_read = true;
     let mut total_write = true;
@@ -340,66 +400,109 @@ pub async fn permit(
 
     let mut total_prompt = None;
     for path in paths {
+        log.log(loga::DEBUG, format!("Permit: Testing permissions for path {:?}", path.0));
+        let mut new_tails = vec![];
+        let mut tails = vec![rules];
         let mut path_lock = false;
+        let mut path_meta = false;
         let mut path_derive = false;
         let mut path_read = false;
         let mut path_write = false;
-        let mut tails = vec![rules];
-        let mut new_tails = vec![];
-        for seg in &path.0 {
+        let mut segs = path.0.iter();
+        loop {
+            let seg = segs.next();
             for tail in tails.drain(..) {
                 for rule in &tail.rules {
                     let mut matched = true;
                     if let Some(match_binary) = &rule.match_binary {
                         let submatch = shed!{
-                            'done_match _;
+                            'submatch _;
                             for proc in &principal.chain {
                                 if proc.binary.as_ref() == Some(&match_binary.path) {
-                                    break 'done_match true;
+                                    log.log(loga::DEBUG, format!("Permit: MATCHED binary at [{}]", proc.pid));
+                                    break 'submatch true;
                                 }
                                 if !match_binary.walk_ancestors {
-                                    break 'done_match false;
+                                    log.log(
+                                        loga::DEBUG,
+                                        format!("Permit: Didn't match user at [{}], not walking ancestors", proc.pid),
+                                    );
+                                    break 'submatch false;
                                 }
                             }
-                            break 'done_match false;
+                            break 'submatch false;
                         };
                         matched = matched && submatch;
                     }
                     if let Some(match_systemd) = &rule.match_systemd {
                         let submatch = shed!{
-                            'done_match _;
+                            'submatch _;
                             for proc in &principal.chain {
                                 if proc.systemd.as_ref() == Some(match_systemd) {
-                                    break 'done_match true;
+                                    log.log(loga::DEBUG, format!("Permit: MATCHED systemd at [{}]", proc.pid));
+                                    break 'submatch true;
                                 }
+                                log.log(
+                                    loga::DEBUG,
+                                    format!(
+                                        "Permit: Systemd mismatch at [{}], got {} want {}",
+                                        proc.pid.dbg_str(),
+                                        proc.systemd.dbg_str(),
+                                        match_systemd
+                                    ),
+                                );
                             }
-                            break 'done_match false;
+                            break 'submatch false;
                         };
                         matched = matched && submatch;
                     }
                     if let Some(match_user) = &rule.match_user {
                         let submatch = shed!{
-                            'done_match _;
+                            'submatch _;
                             for proc in &principal.chain {
                                 shed!{
                                     if let Some(match_user_id) = &match_user.user_id {
                                         if proc.uid.as_ref() != Some(match_user_id) {
+                                            log.log(
+                                                loga::DEBUG,
+                                                format!(
+                                                    "Permit: UID mismatch at [{}], got {} want {}",
+                                                    proc.pid,
+                                                    proc.uid.dbg_str(),
+                                                    match_user_id
+                                                ),
+                                            );
                                             break;
                                         }
+                                        log.log(loga::DEBUG, format!("Permit: MATCHED UID at [{}]", proc.pid));
                                     }
                                     if let Some(match_group_id) = &match_user.group_id {
                                         if proc.gid.as_ref() != Some(match_group_id) {
+                                            log.log(
+                                                loga::DEBUG,
+                                                format!(
+                                                    "Permit: GID mismatch at [{}], got {} want {}",
+                                                    proc.pid,
+                                                    proc.gid.dbg_str(),
+                                                    match_group_id
+                                                ),
+                                            );
                                             break;
                                         }
+                                        log.log(loga::DEBUG, format!("Permit: MATCHED GID at [{}]", proc.pid));
                                     }
-                                    break 'done_match true;
+                                    break 'submatch true;
                                 }
                                 if !match_user.walk_ancestors {
                                     matched = false;
+                                    log.log(
+                                        loga::DEBUG,
+                                        format!("Permit: Didn't match user at [{}], not walking ancestors", proc.pid),
+                                    );
                                     break;
                                 }
                             }
-                            break 'done_match false;
+                            break 'submatch false;
                         };
                         matched = matched && submatch;
                     }
@@ -408,10 +511,11 @@ pub async fn permit(
                     }
 
                     // Path permissions are union of permissions for each matching rule
-                    path_lock = path_lock || rule.permit_lock;
-                    path_derive = path_derive || rule.permit_derive;
-                    path_read = path_read || rule.permit_read;
-                    path_write = path_write || rule.permit_write;
+                    path_write = path_write || rule.permit as usize >= PermitLevel::Write as usize;
+                    path_read = path_read || rule.permit as usize >= PermitLevel::Read as usize;
+                    path_derive = path_derive || rule.permit as usize >= PermitLevel::Derive as usize;
+                    path_meta = path_meta || rule.permit as usize >= PermitLevel::Meta as usize;
+                    path_lock = path_lock || rule.permit as usize >= PermitLevel::Lock as usize;
                     if let Some(rule_prompt) = &rule.prompt {
                         let prompt = total_prompt.get_or_insert_with(|| TotalPrompt { rules: HashMap::new() });
                         prompt
@@ -420,26 +524,32 @@ pub async fn permit(
                     }
                 }
 
-                // Recurse
-                if let Some(wildcard) = &tail.wildcard {
-                    new_tails.push(wildcard.as_ref());
-                }
-                if let Some(child) = tail.children.get(seg) {
-                    new_tails.push(child);
+                // Descend
+                if let Some(seg) = seg {
+                    if let Some(wildcard) = &tail.wildcard {
+                        new_tails.push(wildcard.as_ref());
+                    }
+                    if let Some(child) = tail.children.get(seg) {
+                        new_tails.push(child);
+                    }
                 }
             }
             swap(&mut tails, &mut new_tails);
+            if seg.is_none() {
+                break;
+            }
         }
 
         // Overall permissions are most restrictive of permissions for any path
         total_lock = total_lock && path_lock;
+        total_meta = total_meta && path_meta;
         total_derive = total_derive && path_derive;
         total_read = total_read && path_read;
         total_write = total_write && path_write;
     }
     if let Some(prompt) = total_prompt {
         let (resp_tx, resp_rx) = oneshot::channel();
-        fg_tx.try_send(B2F::Prompt(B2FPrompt { prompt_rules: prompt.rules.clone() }, resp_tx))?;
+        fg_tx.send(B2F::Prompt(B2FPrompt { prompt_rules: prompt.rules.clone() }, resp_tx))?;
         match resp_rx.await.unwrap() {
             Ok(Some(b)) => {
                 if !b {
@@ -456,6 +566,7 @@ pub async fn permit(
     }
     return Ok(Perms {
         lock: total_lock,
+        meta: total_meta,
         derive: total_derive,
         read: total_read,
         write: total_write,

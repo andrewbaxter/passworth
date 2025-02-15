@@ -42,6 +42,8 @@ flowcontrol = "0.2"
 glove = "0.1"
 schemars = "0.8"
 async-stream = "0.3"
+ssh-key = { version = "0.6", features = ["crypto"] }
+totp-rs = { version = "5.6.0", features = ["otpauth"] }
 
 [build-dependencies]
 good-ormning = { version = "0.3", features = ["sqlite", "chrono"] }

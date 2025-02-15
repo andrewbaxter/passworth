@@ -12,9 +12,11 @@ use {
             helpers::{
                 expr_and,
                 expr_field_eq,
+                expr_field_lte,
                 field_param,
                 set_field,
             },
+            select_body::Order,
         },
         schema::{
             constraint::{
@@ -29,11 +31,7 @@ use {
                 Field,
             },
         },
-        types::{
-            type_i32,
-            SimpleSimpleType,
-            SimpleType,
-        },
+        types::type_str,
         QueryResCount,
         Version,
     },
@@ -143,89 +141,57 @@ fn main() {
             let rev_id = table.rowid_field(&mut latest_version, None);
             let rev_date = table.field(&mut latest_version, "zG4QTFY3G", "rev_stamp", field_utctime_ms().build());
             let path = table.field(&mut latest_version, "zLQI9HQUQ", "path", field_str().build());
-            let value = table.field(&mut latest_version, "zLAPH3H29", "data", field_str().opt().build());
+            let value = table.field(&mut latest_version, "zLAPH3H29", "data", field_str().build());
             queries.push(
                 new_insert(
                     &table,
                     vec![set_field("stamp", &rev_date), set_field("path", &path), set_field("value", &value)],
                 ).build_query("values_insert", QueryResCount::None),
             );
-            queries.push(new_select(&table)
-                .where_(expr_and(vec![
-                    //. .
-                    Expr::BinOp {
-                        left: Box::new(Expr::field(&path)),
-                        op: BinOp::Like,
-                        right: Box::new(Expr::Call {
-                            func: "format".to_string(),
-                            args: vec![Expr::LitString("%s%%".to_string()), field_param("prefix", &path)],
-                            compute_type: ComputeType::new(move |_ctx, _path, _args| {
-                                return Some(type_i32().build());
-                            }),
-                        }),
-                    },
-                    Expr::BinOp {
-                        left: Box::new(Expr::field(&rev_id)),
-                        op: BinOp::LessThan,
-                        right: Box::new(field_param("at", &rev_id)),
-                    }
-                ]))
-                .group(vec![Expr::field(&path)])
-                .return_named("rev_id", expr_max(&rev_id))
-                .return_field(&rev_date)
-                .return_field(&path)
-                .return_field(&value)
-                .group(vec![Expr::LitNull(SimpleType {
-                    // Hack to get max to return 0 rows for empty result set
-                    type_: SimpleSimpleType::Bool,
-                    custom: None,
-                })])
-                .build_query("values_get", QueryResCount::Many));
-            queries.push(new_select(&table)
-                .where_(expr_and(vec![
-                    //. .
-                    Expr::BinOp {
-                        left: Box::new(Expr::BinOp {
-                            left: Box::new(Expr::field(&path)),
-                            op: BinOp::Like,
-                            right: Box::new(Expr::Call {
-                                func: "format".to_string(),
-                                args: vec![Expr::LitString("%s%%".to_string()), field_param("prefix", &path)],
-                                compute_type: ComputeType::new(move |_ctx, _path, _args| {
-                                    return Some(type_i32().build());
-                                }),
-                            }),
-                        }),
-                        op: BinOp::Or,
-                        right: Box::new(Expr::BinOp {
-                            left: Box::new(Expr::Call {
-                                func: "instr".to_string(),
-                                args: vec![field_param("prefix", &path), Expr::field(&path)],
-                                compute_type: ComputeType::new(move |_ctx, _path, _args| {
-                                    return Some(type_i32().build());
-                                }),
-                            }),
-                            op: BinOp::Equals,
-                            right: Box::new(Expr::LitI32(0)),
-                        }),
-                    },
-                    Expr::BinOp {
-                        left: Box::new(Expr::field(&rev_id)),
-                        op: BinOp::LessThan,
-                        right: Box::new(field_param("at", &rev_id)),
-                    }
-                ]))
-                .group(vec![Expr::field(&path)])
-                .return_named("rev_id", expr_max(&rev_id))
-                .return_field(&rev_date)
-                .return_field(&path)
-                .return_field(&value)
-                .group(vec![Expr::LitNull(SimpleType {
-                    // Hack to get max to return 0 rows for empty result set
-                    type_: SimpleSimpleType::Bool,
-                    custom: None,
-                })])
-                .build_query("values_get_above_below", QueryResCount::Many));
+            queries.push(
+                new_select(&table)
+                    .where_(expr_and(vec![
+                        //. .
+                        Expr::BinOpChain {
+                            op: BinOp::Or,
+                            exprs: vec![
+                                //. .
+                                expr_field_eq("path", &path),
+                                Expr::BinOp {
+                                    left: Box::new(Expr::field(&path)),
+                                    op: BinOp::Like,
+                                    right: Box::new(Expr::Call {
+                                        func: "format".to_string(),
+                                        args: vec![Expr::LitString("%s/%%".to_string()), field_param("path", &path)],
+                                        compute_type: ComputeType::new(move |_ctx, _path, _args| {
+                                            return Some(type_str().build());
+                                        }),
+                                    }),
+                                }
+                            ],
+                        },
+                        expr_field_lte("at", &rev_id)
+                    ]))
+                    .group(vec![Expr::field(&path)])
+                    .return_named("rev_id", expr_max(&rev_id))
+                    .return_field(&rev_date)
+                    .return_field(&path)
+                    .return_field(&value)
+                    .order(Expr::field(&rev_date), Order::Asc)
+                    .build_query("values_get", QueryResCount::Many),
+            );
+            queries.push(
+                new_select(&table)
+                    .where_(expr_and(vec![
+                        //. .
+                        expr_field_eq("path", &path),
+                        expr_field_lte("at", &rev_id)
+                    ]))
+                    .group(vec![Expr::field(&path)])
+                    .return_named("rev_id", expr_max(&rev_id))
+                    .return_field(&value)
+                    .build_query("values_get_exact", QueryResCount::MaybeOne),
+            );
         }
 
         // Generate

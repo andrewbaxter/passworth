@@ -408,3 +408,11 @@ impl CardThreadNeedTouch {
         return Ok((CardThreadDecryptor(self.0), b));
     }
 }
+
+pub fn pgp_from_armor(key: &str) -> Result<sequoia_openpgp::Cert, loga::Error> {
+    return Ok(
+        sequoia_openpgp::Cert::from_reader(sequoia_openpgp::armor::Reader::from_reader(&mut key.as_bytes(), None))
+            .map_err(loga::err)
+            .context("Error reading key data as armored pgp cert")?,
+    );
+}
