@@ -92,10 +92,15 @@ use {
             HashSet,
         },
         env,
+        fs::{
+            metadata,
+            Permissions,
+        },
         io::{
             Cursor,
             Write,
         },
+        os::unix::fs::PermissionsExt,
         path::PathBuf,
         str::FromStr,
         sync::{
@@ -106,7 +111,10 @@ use {
     },
     taskmanager::TaskManager,
     tokio::{
-        fs::create_dir_all,
+        fs::{
+            self,
+            create_dir_all,
+        },
         select,
         spawn,
         sync::{
@@ -536,7 +544,12 @@ async fn main2() -> Result<(), loga::Error> {
 
     // Start command server
     let activity = Arc::new(Notify::new());
-    let mut ipc_server = proto::msg::Server::new(ipc_path()).await.map_err(loga::err)?;
+    let ipc_path = ipc_path();
+    let mut ipc_server = proto::msg::Server::new(&ipc_path).await.map_err(loga::err)?;
+    fs::set_permissions(&ipc_path, Permissions::from_mode(0o777))
+        .await
+        .map_err(loga::err)
+        .context("Error setting mode on socket")?;
     tm.critical_task("Command processing", {
         async fn get_privdb(state: &State) -> Result<rusqlite::Connection, loga::Error> {
             enum Invert {

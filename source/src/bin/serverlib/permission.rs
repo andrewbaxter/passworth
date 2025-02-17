@@ -216,7 +216,7 @@ pub async fn scan_principal(
                         };
                         pid = Some(pid0)
                     },
-                    b"ID" => name = Some(String::from_utf8_lossy(&value).to_string()),
+                    b"Id" => name = Some(String::from_utf8_lossy(&value).to_string()),
                     _ => {
                         log.log(loga::WARN, "Got invalid line in systemd service PID list");
                         continue;
