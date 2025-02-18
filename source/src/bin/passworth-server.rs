@@ -93,7 +93,6 @@ use {
         },
         env,
         fs::{
-            metadata,
             Permissions,
         },
         io::{
@@ -201,70 +200,70 @@ async fn main2() -> Result<(), loga::Error> {
         )?;
 
     // Start fg thread
-    let (fg_tx, fg_rx) = std::sync::mpsc::channel();
+    let (fg_tx, fg_rx) = tokio::sync::mpsc::channel(100);
     tm.critical_task("Foreground interactions", {
         let fg_state = Arc::new(FgState {
             log: log.fork(ea!(sys = "human")),
             last_prompts: Mutex::new(HashMap::new()),
         });
-        let fg_state = fg_state.clone();
-        let tm = tm.clone();
         let work = spawn_blocking({
-            let tm = tm.clone();
+            let fg_state = fg_state.clone();
+            let tm = RefCell::new(Some(tm.clone()));
+            let fg_rx = RefCell::new(Some(fg_rx));
             move || {
-                loop {
-                    let Ok(req) = fg_rx.recv() else {
-                        break;
-                    };
-                    let req = RefCell::new(Some(req));
-                    let tm = RefCell::new(Some(tm.clone()));
-                    let app =
-                        gtk4::Application::builder()
-                            .application_id("x.passworth")
-                            .flags(gtk4::gio::ApplicationFlags::FLAGS_NONE)
-                            .build();
-                    gtk4::gio::prelude::ApplicationExt::connect_activate(&app, {
+                let app =
+                    gtk4::Application::builder()
+                        .application_id("x.passworth")
+                        .flags(gtk4::gio::ApplicationFlags::FLAGS_NONE)
+                        .build();
+                gtk4::gio::prelude::ApplicationExt::connect_activate(&app, {
+                    let fg_state = fg_state.clone();
+                    move |app| {
+                        let app = app.clone();
+
+                        // Hack to work around `connect_activate` being `Fn` instead of `FnOnce`
                         let fg_state = fg_state.clone();
-                        move |app| {
-                            let app = app.clone();
+                        let tm = tm.borrow_mut().take().unwrap();
+                        let mut fg_rx = fg_rx.borrow_mut().take().unwrap();
 
-                            // Hack to work around `connect_activate` being `Fn` instead of `FnOnce`
-                            let fg_state = fg_state.clone();
-                            let tm = tm.borrow_mut().take().unwrap();
-                            let req = req.borrow_mut().take().unwrap();
-
-                            // Start current-thread async task in gtk thread to read queue
-                            gtk4::glib::spawn_future_local({
-                                let hold = app.hold();
-                                let work = async move {
-                                    let _hold = hold;
+                        // Start current-thread async task in gtk thread to read queue
+                        gtk4::glib::spawn_future_local({
+                            let hold = app.hold();
+                            let work = async move {
+                                let _hold = hold;
+                                while let Some(req) = fg_rx.recv().await {
                                     match req {
                                         B2F::Unlock(req, resp) => {
-                                            resp.send(fg::do_unlock(fg_state, &app, Arc::new(req)).await).ignore();
+                                            resp
+                                                .send(fg::do_unlock(fg_state.clone(), &app, Arc::new(req)).await)
+                                                .ignore();
                                         },
                                         B2F::Initialize(req, resp) => {
                                             resp
-                                                .send(fg::do_initialize(fg_state, &app, Arc::new(req)).await)
+                                                .send(fg::do_initialize(fg_state.clone(), &app, Arc::new(req)).await)
                                                 .ignore();
                                         },
                                         B2F::Prompt(req, resp) => {
-                                            resp.send(fg::do_prompt(fg_state, &app, Arc::new(req)).await).ignore();
+                                            resp
+                                                .send(fg::do_prompt(fg_state.clone(), &app, Arc::new(req)).await)
+                                                .ignore();
                                         },
                                     }
-                                };
-                                async move {
-                                    select!{
-                                        _ = work =>(),
-                                        _ = tm.until_terminate() =>()
-                                    };
                                 }
-                            });
-                        }
-                    });
-                    gtk4::prelude::ApplicationExtManual::run_with_args(&app, &[] as &[String]);
-                }
+                            };
+                            async move {
+                                select!{
+                                    _ = work =>(),
+                                    _ = tm.until_terminate() =>()
+                                };
+                            }
+                        });
+                    }
+                });
+                gtk4::prelude::ApplicationExtManual::run_with_args(&app, &[] as &[String]);
             }
         });
+        let tm = tm.clone();
         async move {
             select!{
                 w = work => {
@@ -288,7 +287,7 @@ async fn main2() -> Result<(), loga::Error> {
         privdb_path: PathBuf,
         root_factor: Arc<FactorTree>,
         token: Mutex<TokenState>,
-        fg_tx: std::sync::mpsc::Sender<B2F>,
+        fg_tx: tokio::sync::mpsc::Sender<B2F>,
         lock_timeout: u64,
     }
 
@@ -456,7 +455,7 @@ async fn main2() -> Result<(), loga::Error> {
                     privdb_path: state.privdb_path.clone(),
                     root_factor: prev_root_factor.clone(),
                     state: prev_state.clone(),
-                }, resp_tx)).ignore();
+                }, resp_tx)).await.ignore();
                 unlock_result =
                     resp_rx
                         .await?
@@ -474,7 +473,7 @@ async fn main2() -> Result<(), loga::Error> {
                 state_changed: factor_state_changed,
                 prev_state: prev_state,
                 prev_root_factor: Some(prev_root_factor),
-            }, resp_tx)).ignore();
+            }, resp_tx)).await.ignore();
             let init_result =
                 resp_rx
                     .await?
@@ -524,7 +523,7 @@ async fn main2() -> Result<(), loga::Error> {
                 state_changed: all_factors.clone(),
                 prev_state: HashMap::new(),
                 prev_root_factor: None,
-            }, resp_tx)).ignore();
+            }, resp_tx)).await.ignore();
             let init_result =
                 resp_rx
                     .await?
@@ -601,7 +600,7 @@ async fn main2() -> Result<(), loga::Error> {
                         privdb_path: state.privdb_path.clone(),
                         root_factor: state.root_factor.clone(),
                         state: factor_state,
-                    }, fg_tx)).ignore();
+                    }, fg_tx)).await.ignore();
                     let res = fg_rx.await?.context("Error during fg unlock")?.context("User closed unlock window")?;
 
                     // Update shared token + return

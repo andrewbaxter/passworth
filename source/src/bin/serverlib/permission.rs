@@ -383,7 +383,7 @@ pub struct Perms {
 
 pub async fn permit(
     log: &Log,
-    fg_tx: std::sync::mpsc::Sender<B2F>,
+    fg_tx: tokio::sync::mpsc::Sender<B2F>,
     rules: &RuleTree,
     principal: &PrincipalMeta,
     paths: &[SpecificPath],
@@ -549,7 +549,7 @@ pub async fn permit(
     }
     if let Some(prompt) = total_prompt {
         let (resp_tx, resp_rx) = oneshot::channel();
-        fg_tx.send(B2F::Prompt(B2FPrompt { prompt_rules: prompt.rules.clone() }, resp_tx))?;
+        fg_tx.send(B2F::Prompt(B2FPrompt { prompt_rules: prompt.rules.clone() }, resp_tx)).await?;
         match resp_rx.await.unwrap() {
             Ok(Some(b)) => {
                 if !b {
