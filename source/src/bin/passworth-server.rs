@@ -134,7 +134,7 @@ pub mod serverlib;
 
 #[derive(Aargvark)]
 struct Args {
-    config: AargvarkJson<config::Config>,
+    config: AargvarkJson<config::latest::Config>,
     /// Log excessive information.
     debug: Option<()>,
     /// Validate config then exit.
@@ -162,9 +162,7 @@ async fn main2() -> Result<(), loga::Error> {
     if args.validate.is_some() {
         return Ok(());
     }
-    let config = match args.config.value {
-        config::Config::V1(c) => c,
-    };
+    let config = args.config.value;
     let log = Log::new_root(if args.debug.is_some() {
         loga::DEBUG
     } else {
@@ -1311,7 +1309,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             return Err(loga::err("No value at path or value is not a string"));
                                         };
                                         let otp =
-                                            totp_rs::TOTP::from_url(
+                                            totp_rs::TOTP::from_url_unchecked(
                                                 &otp_url,
                                             ).context("Failed to parse OTP url at path")?;
                                         let token = otp.generate_current().context("Error generating OTP token")?;

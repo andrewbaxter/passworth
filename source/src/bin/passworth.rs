@@ -79,7 +79,8 @@ struct ReadCommand {
     path: SpecificPath,
     /// Optionally retrieve the latest data at or before a previous revision id.
     revision: Option<i64>,
-    /// Output json encoded data rather than de-quoting strings.
+    /// Output json encoded data rather than de-quoting strings. This also allows
+    /// outputting a root null value.
     json: Option<()>,
 }
 
@@ -197,7 +198,8 @@ enum Command {
     /// specified path.
     MetaSshPubkey(MetaSshPubkeyCommand),
     /// Unlock if locked, and retrieve the data at the following paths (merged into one
-    /// JSON tree).
+    /// JSON tree). Errors if no data found (null output) unless the `--json` flag is
+    /// used.
     Read(ReadCommand),
     /// List revision ids and timestamps for any values under the specified paths
     /// (merged into one JSON tree).
@@ -313,6 +315,9 @@ async fn main2() -> Result<(), loga::Error> {
             match (args.json.is_some(), &res) {
                 (false, serde_json::Value::String(v)) => {
                     println!("{}", v);
+                },
+                (false, serde_json::Value::Null) => {
+                    return Err(loga::err("No value found."));
                 },
                 (_, res) => {
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
