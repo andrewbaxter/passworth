@@ -54,7 +54,7 @@ use {
 pub struct RuleMatchUser {
     pub user_id: Option<u32>,
     pub group_id: Option<u32>,
-    pub walk_ancestors: bool,
+    pub walk_ancestors: usize,
 }
 
 #[derive(Debug)]
@@ -160,6 +160,7 @@ pub struct PrincipalMetaProc {
 }
 
 pub struct PrincipalMeta {
+    /// Starts at process, then first parent, then 2nd, etc.
     chain: Vec<PrincipalMetaProc>,
 }
 
@@ -417,15 +418,19 @@ pub async fn permit(
                     if let Some(match_binary) = &rule.match_binary {
                         let submatch = shed!{
                             'submatch _;
-                            for proc in &principal.chain {
+                            for (depth, proc) in principal.chain.iter().enumerate() {
                                 if proc.binary.as_ref() == Some(&match_binary.path) {
                                     log.log(loga::DEBUG, format!("Permit: MATCHED binary at [{}]", proc.pid));
                                     break 'submatch true;
                                 }
-                                if !match_binary.walk_ancestors {
+                                if depth >= match_binary.walk_ancestors {
                                     log.log(
                                         loga::DEBUG,
-                                        format!("Permit: Didn't match user at [{}], not walking ancestors", proc.pid),
+                                        format!(
+                                            "Permit: Didn't match user at [{}], depth {}, not walking ancestors",
+                                            proc.pid,
+                                            depth
+                                        ),
                                     );
                                     break 'submatch false;
                                 }
@@ -459,7 +464,7 @@ pub async fn permit(
                     if let Some(match_user) = &rule.match_user {
                         let submatch = shed!{
                             'submatch _;
-                            for proc in &principal.chain {
+                            for (depth, proc) in principal.chain.iter().enumerate() {
                                 shed!{
                                     if let Some(match_user_id) = &match_user.user_id {
                                         if proc.uid.as_ref() != Some(match_user_id) {
@@ -493,7 +498,7 @@ pub async fn permit(
                                     }
                                     break 'submatch true;
                                 }
-                                if !match_user.walk_ancestors {
+                                if depth >= match_user.walk_ancestors {
                                     matched = false;
                                     log.log(
                                         loga::DEBUG,

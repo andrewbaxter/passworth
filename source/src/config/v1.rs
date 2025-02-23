@@ -76,16 +76,20 @@ pub struct MatchUser {
     pub user: Option<UserGroupId>,
     #[serde(default)]
     pub group: Option<UserGroupId>,
+    /// Sufficient if any ancestor up to this number of steps away from the process
+    /// matches (excluding the process itself). Defaults to 0.
     #[serde(default)]
-    pub walk_ancestors: bool,
+    pub walk_ancestors: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MatchBinary {
     pub path: PathBuf,
+    /// Sufficient if any ancestor up to this number of steps away from the process
+    /// matches (excluding the process itself). Defaults to 0.
     #[serde(default)]
-    pub walk_ancestors: bool,
+    pub walk_ancestors: usize,
 }
 
 /// Actions permitted by a rule. Later levels include all prior levels.

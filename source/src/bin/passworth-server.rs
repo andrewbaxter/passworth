@@ -324,7 +324,8 @@ async fn main2() -> Result<(), loga::Error> {
         for t in pubdb::factor_list(&mut pubdbc)? {
             prev_state.insert(t.id, t.state);
         }
-        if let Some(previous_config) = pubdb::config_get(&mut pubdbc)? {
+        if let Some(previous_config) =
+            pubdb::config_get(&mut pubdbc).context("Error reading previous config for config migrations")? {
             let previous_config = match previous_config {
                 config::Config::V1(config) => config,
             };
