@@ -7,9 +7,12 @@ use {
         vark,
         Aargvark,
     },
+    async_tempfile::TempFile,
     loga::{
         ea,
         fatal,
+        DebugDisplay,
+        ErrContext,
         Log,
         ResultContext,
     },
@@ -22,6 +25,7 @@ use {
         proto::{
             self,
             ipc_path,
+            to_b32,
             C2SGenerateVariant,
             C2SGenerateVariantAlphanumeric,
             C2SGenerateVariantAlphanumericSymbols,
@@ -29,10 +33,17 @@ use {
             C2SGenerateVariantSafeAlphanumeric,
         },
     },
-    std::io::{
-        stdin,
-        Read,
-        Write,
+    std::{
+        io::{
+            stdin,
+            Read,
+            Write,
+        },
+        path::Path,
+    },
+    tokio::io::{
+        AsyncReadExt,
+        AsyncWriteExt,
     },
 };
 
@@ -58,7 +69,7 @@ struct GenerateVariantAlphanumericSymbols {
 
 #[derive(Aargvark)]
 enum GenerateVariant {
-    /// Generate random bytes, encoded as base64
+    /// Generate random bytes, encoded as zbase32
     Bytes(GenerateVariantBytes),
     /// Generate a password with a shorter visually-unambiguous, case-insensitive
     /// alphanumeric characters.
@@ -116,6 +127,12 @@ struct WriteCommand {
     json: Option<()>,
     /// Input is binary, store as a B64 JSON string
     binary: Option<()>,
+}
+
+#[derive(Aargvark)]
+struct WriteEditCommand {
+    /// Path to create/overwrite
+    path: SpecificPath,
 }
 
 #[derive(Aargvark)]
@@ -207,6 +224,12 @@ enum Command {
     /// Unlock if locked, and replace the data at the following paths. The data is read
     /// from stdin.
     Write(WriteCommand),
+    /// Create or edit a value using the editor you have configured in `SECURE_EDITOR`.
+    /// The data is edited as JSON, however invalid JSON will be converted to a string
+    /// value. The editor is given a temporary file with the current secret data as its
+    /// first argument, and the contents of the file will be stored if it exits with no
+    /// error.
+    WriteEdit(WriteEditCommand),
     /// Move data from one location to another.
     WriteMove(WriteMoveCommand),
     /// Generate a secret and store it at the specified location - for asymmetric keys
@@ -337,9 +360,92 @@ async fn main2() -> Result<(), loga::Error> {
             let data = if args.json.is_some() {
                 serde_json::from_slice(&data).context("Error parsing set value as JSON")?
             } else if args.binary.is_some() {
-                serde_json::to_value(&data).unwrap()
+                serde_json::Value::String(to_b32(&data))
             } else {
                 serde_json::Value::String(String::from_utf8(data).context("Error parsing value as UTF-8")?)
+            };
+            req(proto::ReqWrite(vec![(args.path, data)])).await?;
+        },
+        Command::WriteEdit(args) => {
+            const ENV_EDITOR: &str = "SECURE_EDITOR";
+            let Some(editor) = std::env::var_os(ENV_EDITOR) else {
+                return Err(loga::err_with("Missing secure editor environment variable", ea!(env = ENV_EDITOR)));
+            };
+
+            // Get existing data
+            let mut res = req(proto::ReqRead {
+                paths: vec![args.path.clone()],
+                at: None,
+            }).await?;
+
+            // Remove prefix on data
+            for seg in &args.path.0 {
+                match res {
+                    serde_json::Value::Object(mut o) => res = o.remove(seg).unwrap(),
+                    serde_json::Value::Null => {
+                        res = serde_json::Value::Null;
+                        break;
+                    },
+                    r => unreachable!("got {:?}", r),
+                }
+            }
+
+            // Store in tempfile
+            let run_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+                dir
+            } else {
+                "/run".into()
+            };
+            let t = TempFile::new_in(Path::new(&run_dir)).await.context("Error creating temp file")?;
+            t
+                .open_rw()
+                .await
+                .context("Error opening temp file")?
+                .write_all(&serde_json::to_vec_pretty(&res).unwrap())
+                .await
+                .context_with(
+                    "Error writing secret to temporary file for editing",
+                    ea!(path = t.file_path().dbg_str()),
+                )?;
+            t.sync_all().await.context("Error flushing data")?;
+
+            // Edit it
+            let mut c = tokio::process::Command::new(editor);
+            c.arg(t.file_path());
+            c.output().await.context_with("Error editing secret", ea!(command = c.dbg_str()))?;
+
+            // Save result
+            let mut data = vec![];
+            t.sync_all().await.context("Error flushing data")?;
+            t
+                .open_ro()
+                .await
+                .context("Error opening secret to read back")?
+                .read_to_end(&mut data)
+                .await
+                .context("Error reading modified secret data")?;
+            let data = match serde_json::from_slice::<serde_json::Value>(&data) {
+                Ok(d) => d,
+                Err(e) => {
+                    log.log_err(
+                        loga::WARN,
+                        e.context("Modified secret was not valid JSON - converting to JSON string before writing"),
+                    );
+                    match String::from_utf8(data.clone()) {
+                        Ok(d) => {
+                            serde_json::Value::String(d)
+                        },
+                        Err(e) => {
+                            log.log_err(
+                                loga::WARN,
+                                e.context(
+                                    "Modified secret was not valid UTF-8 - converting to base-32 encoded JSON string before writing",
+                                ),
+                            );
+                            serde_json::Value::String(to_b32(&data))
+                        },
+                    }
+                },
             };
             req(proto::ReqWrite(vec![(args.path, data)])).await?;
         },

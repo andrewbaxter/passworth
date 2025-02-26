@@ -45,6 +45,7 @@ use {
         proto::{
             self,
             ipc_path,
+            to_b32,
         },
     },
     sequoia_openpgp::{
@@ -92,9 +93,7 @@ use {
             HashSet,
         },
         env,
-        fs::{
-            Permissions,
-        },
+        fs::Permissions,
         io::{
             Cursor,
             Write,
@@ -1004,27 +1003,27 @@ async fn main2() -> Result<(), loga::Error> {
                                             match req.variant {
                                                 passworth::proto::C2SGenerateVariant::Bytes(args) => {
                                                     data =
-                                                        serde_json::to_value(
-                                                            &generate::gen_bytes(args.length),
-                                                        ).unwrap();
+                                                        serde_json::Value::String(
+                                                            to_b32(&generate::gen_bytes(args.length)),
+                                                        );
                                                 },
                                                 passworth::proto::C2SGenerateVariant::SafeAlphanumeric(args) => {
                                                     data =
-                                                        serde_json::to_value(
+                                                        serde_json::Value::String(
                                                             generate::gen_safe_alphanum(args.length),
-                                                        ).unwrap();
+                                                        );
                                                 },
                                                 passworth::proto::C2SGenerateVariant::Alphanumeric(args) => {
                                                     data =
-                                                        serde_json::to_value(
+                                                        serde_json::Value::String(
                                                             generate::gen_alphanum(args.length),
-                                                        ).unwrap();
+                                                        );
                                                 },
                                                 passworth::proto::C2SGenerateVariant::AlphanumericSymbols(args) => {
                                                     data =
-                                                        serde_json::to_value(
+                                                        serde_json::Value::String(
                                                             generate::gen_alphanum_symbols(args.length),
-                                                        ).unwrap();
+                                                        );
                                                 },
                                                 passworth::proto::C2SGenerateVariant::Pgp => {
                                                     let (cert, _) =

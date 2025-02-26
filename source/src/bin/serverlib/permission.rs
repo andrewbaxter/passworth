@@ -422,12 +422,22 @@ pub async fn permit(
                                 if proc.binary.as_ref() == Some(&match_binary.path) {
                                     log.log(loga::DEBUG, format!("Permit: MATCHED binary at [{}]", proc.pid));
                                     break 'submatch true;
+                                } else {
+                                    log.log(
+                                        loga::DEBUG,
+                                        format!(
+                                            "Permit: Binary mismatch at [{}], got {} want {}",
+                                            proc.pid,
+                                            proc.binary.dbg_str(),
+                                            match_binary.path.dbg_str()
+                                        ),
+                                    );
                                 }
                                 if depth >= match_binary.walk_ancestors {
                                     log.log(
                                         loga::DEBUG,
                                         format!(
-                                            "Permit: Didn't match user at [{}], depth {}, not walking ancestors",
+                                            "Permit: Didn't match binary at [{}], depth {}, not walking ancestors",
                                             proc.pid,
                                             depth
                                         ),
@@ -502,7 +512,11 @@ pub async fn permit(
                                     matched = false;
                                     log.log(
                                         loga::DEBUG,
-                                        format!("Permit: Didn't match user at [{}], not walking ancestors", proc.pid),
+                                        format!(
+                                            "Permit: Didn't match user at [{}], depth {}, not walking ancestors",
+                                            proc.pid,
+                                            depth
+                                        ),
                                     );
                                     break;
                                 }
