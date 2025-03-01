@@ -5,25 +5,29 @@
   "homepage_url": "https://github.com/andrewbaxter/passworth",
   "version": "0.1.0",
   "author": "Andrew Baxter",
-  "icons": {
-    "128": "icon.png",
-    "16": "icon16.png"
-  },
   "content_security_policy": {
-    "extension_pages": "default-src 'self' 'wasm-unsafe-eval'"
+    "extension_pages": "default-src 'self' 'wasm-unsafe-eval'; script-src 'self' 'wasm-unsafe-eval'"
   },
   "permissions": [
     "activeTab",
     "tabs",
-    "nativeMessaging",
-    "http://*/*",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
     "https://*/*"
   ],
-  "browser_action": {
-    "default_icon": {
-      "16": "icon16.png"
-    },
-    "default_popup": "popup/popup.html"
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
   },
   "commands": {
     "_execute_browser_action": {

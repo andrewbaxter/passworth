@@ -1,8 +1,11 @@
 [package]
 name = "passworth-wasm"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 publish = false
+
+[profile.release]
+debug = true
 
 [dependencies]
 passworth = { path = "../shared" }
@@ -28,3 +31,5 @@ futures = "0.3"
 tokio = { version = "1", features = ["macros", "sync"] }
 rooting = { version = "0.1", features = ["futures"] }
 flowcontrol = "0.2"
+http = "1"
+glove = { version = "0.4" }

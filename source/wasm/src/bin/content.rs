@@ -13,11 +13,11 @@ use {
     },
     passworth_wasm::{
         browser,
+        js_call,
+        js_get,
         ToContent,
     },
-    rooting::{
-        set_root_non_dom,
-    },
+    rooting::set_root_non_dom,
     std::{
         cell::RefCell,
         collections::HashMap,
@@ -29,13 +29,17 @@ use {
         JsValue,
     },
     web_sys::{
+        console,
         HtmlFormElement,
         HtmlInputElement,
     },
 };
 
 fn main() {
+    console_error_panic_hook::set_once();
+    console::log_1(&JsValue::from("a0"));
     let last_focus = Rc::new(RefCell::new(None));
+    console::log_1(&JsValue::from("a1"));
     let focus_listener = EventListener::new(&window(), "focus", {
         let last_focus = last_focus.clone();
         move |ev| {
@@ -45,6 +49,7 @@ fn main() {
             *last_focus.borrow_mut() = Some(e);
         }
     });
+    console::log_1(&JsValue::from("a2"));
     let message_listener = Closure::wrap(Box::new({
         let last_focus = last_focus.clone();
         move |message: JsValue, _, responder: Function| -> () {
@@ -256,6 +261,13 @@ fn main() {
             }
         }
     }) as Box<dyn Fn(JsValue, JsValue, Function)>);
-    browser().runtime().on_message().add_listener(message_listener.as_ref().unchecked_ref());
+    console::log_1(&JsValue::from("a3"));
+    js_call(
+        &js_get(&js_get(&browser(), "runtime"), "onMessage"),
+        "addListener",
+        message_listener.as_ref().unchecked_ref(),
+    );
+    console::log_1(&JsValue::from("a4"));
     set_root_non_dom((focus_listener, message_listener));
+    console::log_1(&JsValue::from("a5"));
 }

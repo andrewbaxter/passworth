@@ -43,9 +43,9 @@ async fn main() {
         let mut stdout = tokio::io::stdout();
         loop {
             // From browser
-            let Some(len) = io_opt(stdin.read_u32().await).context("Error reading downstream request length")? else {
-                break;
-            };
+            let mut len = [0u8; 4];
+            io_opt(stdin.read_exact(&mut len).await).context("Error reading downstream request length")?;
+            let len = u32::from_ne_bytes(len);
             let mut req_body = vec![];
             req_body.resize(len as usize, 0);
             let Some(_) =
@@ -54,8 +54,6 @@ async fn main() {
                 ).context("Error reading downstream request body")? else {
                     break;
                 };
-
-            // Passworth
             let payload =
                 serde_json::from_slice::<ipc::msg::Req>(
                     &req_body,
@@ -64,18 +62,25 @@ async fn main() {
                     ea!(message = String::from_utf8_lossy(&req_body)),
                 )?;
 
+            // Passworth
+            let resp_body = match upstream.send_req_enum(&payload).await {
+                Ok(v) => v,
+                Err(e) => serde_json::to_vec(
+                    &glove::Resp::<()>::Err(format!("Error making request upstream: {}", e)),
+                ).unwrap(),
+            };
+
             // To browser
-            let resp_body = upstream.send_req_enum(&payload).await.map_err(loga::err).context("Error making request upstream")?;
+            let len = (resp_body.len() as u32).to_ne_bytes();
             let Some(_) =
-                io_opt(
-                    stdout.write_u32(resp_body.len() as u32).await,
-                ).context("Error writing downstream response length")? else {
+                io_opt(stdout.write_all(&len).await).context("Error writing downstream response length")? else {
                     break;
                 };
             let Some(_) =
                 io_opt(stdout.write_all(&resp_body).await).context("Error writing downstream response body")? else {
                     break;
                 };
+            stdout.flush().await.context("Failed to flush stdout")?;
         }
         return Ok(());
     }.await {

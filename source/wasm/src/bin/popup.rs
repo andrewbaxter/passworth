@@ -3,8 +3,10 @@ use {
         format::JsValueSerdeExt,
         window,
     },
+    http::Uri,
     js_sys::{
         Array,
+        Promise,
     },
     passworth::{
         datapath::SpecificPath,
@@ -14,17 +16,23 @@ use {
     passworth_wasm::{
         browser,
         force_string,
-        Browser,
+        js_call,
+        js_call2,
+        js_get,
         ToContent,
     },
     rooting::{
         el,
         set_root,
         El,
+        WeakEl,
     },
     serde::Serialize,
     serde_json::json,
-    std::str::FromStr,
+    std::{
+        future::Future,
+        str::FromStr,
+    },
     wasm_bindgen::{
         JsCast,
         JsValue,
@@ -32,6 +40,10 @@ use {
     wasm_bindgen_futures::{
         spawn_local,
         JsFuture,
+    },
+    web_sys::{
+        console,
+        HtmlInputElement,
     },
 };
 
@@ -72,7 +84,7 @@ fn el_group() -> El {
 }
 
 fn el_icon_button<
-    Ft: 'static + Future<Output = ()>,
+    Ft: 'static + Future<Output = Result<(), String>>,
     F: 'static + Fn() -> Ft,
 >(icon: &str, help: &str, action: F) -> El {
     let out = el("button");
@@ -90,7 +102,11 @@ fn el_icon_button<
                 let out = out.weak();
                 let action = action();
                 async move {
-                    action.await;
+                    if let Err(e) = action.await {
+                        console::log_1(
+                            &JsValue::from(format!("Async button invocation aborted with error: {}", e)),
+                        );
+                    }
                     let Some(out) = out.upgrade() else {
                         return;
                     };
@@ -102,34 +118,57 @@ fn el_icon_button<
     return out;
 }
 
-async fn send_to_native<T: ipc::msg::ReqTrait>(message: T) -> T::Resp {
-    return JsValue::into_serde(
-        &JsFuture::from(
-            window()
-                .get("browser")
-                .unwrap()
-                .dyn_into::<Browser>()
-                .unwrap()
-                .runtime()
-                .send_native_message("me.isandrew.passworth", &JsValue::from_serde(&message.to_enum()).unwrap()),
-        )
-            .await
-            .unwrap(),
-    ).unwrap();
+async fn send_to_native<T: ipc::msg::ReqTrait>(message: T) -> Result<T::Resp, String> {
+    let arg1 = JsValue::from("me.isandrew.passworth");
+    console::log_2(&JsValue::from("send_to_native0"), &arg1);
+    let message = message.to_enum();
+    let arg2 = JsValue::from_serde(&message).unwrap();
+    console::log_2(&JsValue::from("send_to_native0 arg2"), &arg2);
+    let call_res =
+        js_call2(&js_get(&browser(), "runtime"), "sendNativeMessage", &arg1, &arg2).dyn_into::<Promise>().unwrap();
+    console::log_2(&JsValue::from("send_to_native1 call res"), &call_res);
+    let call_res = JsFuture::from(call_res).await.unwrap();
+    console::log_2(&JsValue::from("send_to_native1 call res2"), &call_res);
+    let x = JsValue::into_serde::<glove::Resp<T::Resp>>(&call_res).unwrap();
+    console::log_1(&JsValue::from(format!("Got native response: {}", serde_json::to_string_pretty(&x).unwrap())));
+    match x {
+        glove::Resp::Ok(v) => return Ok(v),
+        glove::Resp::Err(v) => return Err(
+            format!(
+                "Error making request to native messaging host [{}]: {}",
+                serde_json::to_string(&message).unwrap(),
+                v
+            ),
+        ),
+    }
+}
+
+async fn get_active_tab() -> (JsValue, JsValue) {
+    console::log_1(&JsValue::from("z0"));
+    let browser = browser();
+    console::log_1(&JsValue::from("z0b"));
+    let tabs = js_get(&browser, "tabs");
+    console::log_1(&JsValue::from("z1"));
+    let query_res = JsFuture::from(js_call(&tabs, "query", &JsValue::from_serde(&json!({
+        "currentWindow": true,
+        "active": true,
+    })).unwrap()).dyn_into::<Promise>().unwrap()).await.unwrap();
+    console::log_1(&JsValue::from("z2"));
+    for tab in query_res.dyn_into::<Array>().unwrap() {
+        return (tabs, tab);
+    }
+    console::log_1(&JsValue::from("z3"));
+    panic!("Couldn't find active tab");
 }
 
 async fn send_to_content(message: impl Serialize) {
-    let tabs = browser().tabs();
-    let query_res = JsFuture::from(tabs.query(&JsValue::from_serde(&json!({
-        "currentWindow": true,
-        "active": true,
-    })).unwrap())).await.unwrap();
-    for tab in query_res.dyn_into::<Array>().unwrap() {
-        tabs.send_message(
-            &js_sys::Reflect::get(&tab, &JsValue::from("id")).unwrap(),
-            &JsValue::from_serde(&message).unwrap(),
-        );
-    }
+    let (tabs, tab) = get_active_tab().await;
+    js_call2(
+        &tabs,
+        "sendMessage",
+        &js_sys::Reflect::get(&tab, &JsValue::from("id")).unwrap(),
+        &JsValue::from_serde(&message).unwrap(),
+    );
 }
 
 fn update(tree_root: &El, raw_paths: Vec<String>) {
@@ -145,16 +184,18 @@ fn update(tree_root: &El, raw_paths: Vec<String>) {
     }
     tree_root.ref_clear();
     tree_root.ref_push(el_async(async move {
+        console::log_1(&JsValue::from("TT0"));
         let raw_tree = send_to_native(ipc::ReqMetaKeys {
             paths: paths,
             at: None,
-        }).await;
+        }).await?;
+        console::log_1(&JsValue::from("TT1"));
         let new_tree = el_vbox();
 
         fn build_row(path: SpecificPath, actions: Vec<El>) -> El {
             return el("div")
                 .classes(&["s_tree_row"])
-                .push(el("span").text(&serde_json::to_string(&path).unwrap()))
+                .push(el("span").text(&path.to_string()))
                 .push(el_hbox().extend(actions));
         }
 
@@ -167,9 +208,10 @@ fn update(tree_root: &El, raw_paths: Vec<String>) {
                         let resp = send_to_native(ipc::ReqRead {
                             paths: vec![path],
                             at: None,
-                        }).await;
+                        }).await?;
                         send_to_content(ToContent::FillField(force_string(&resp))).await;
                         window().close().unwrap();
+                        return Ok(());
                     }
                 }
             })];
@@ -180,9 +222,10 @@ fn update(tree_root: &El, raw_paths: Vec<String>) {
                         move || {
                             let path = path.clone();
                             async move {
-                                let resp = send_to_native(ipc::ReqDeriveOtp { key: path }).await;
+                                let resp = send_to_native(ipc::ReqDeriveOtp { key: path }).await?;
                                 send_to_content(ToContent::FillField(resp)).await;
                                 window().close().unwrap();
+                                return Ok(());
                             }
                         }
                     }));
@@ -205,7 +248,7 @@ fn update(tree_root: &El, raw_paths: Vec<String>) {
                         let resp = send_to_native(ipc::ReqRead {
                             paths: req_paths,
                             at: None,
-                        }).await;
+                        }).await?;
                         let user;
                         if user_field {
                             user = dig(&resp, user_path.0.iter()).unwrap().clone();
@@ -219,6 +262,7 @@ fn update(tree_root: &El, raw_paths: Vec<String>) {
                             ),
                         ).await;
                         window().close().unwrap();
+                        return Ok(());
                     }
                 }
             })]);
@@ -255,50 +299,78 @@ fn update(tree_root: &El, raw_paths: Vec<String>) {
 }
 
 fn main() {
-    let mut raw_paths = vec![];
-    {
-        let hostname = window().location().hostname().unwrap();
-        let hostname_segs = hostname.split('.').collect::<Vec<_>>();
-        for i in 0 ..= hostname_segs.len() - 2 {
-            raw_paths.push(
-                SpecificPath(
-                    vec![
-                        "web".to_string(),
-                        hostname_segs[hostname_segs.len() - 2 - i .. hostname_segs.len()].join(".")
-                    ],
-                ).to_string(),
-            );
-        }
-    }
-    let hostname = raw_paths.first().cloned().unwrap();
+    console_error_panic_hook::set_once();
+    console::log_1(&JsValue::from("b1"));
     let tree_root = el_group();
-    update(&tree_root, raw_paths);
-    let addr = el("input").attr("value", &hostname);
+    console::log_1(&JsValue::from("b2"));
+    let addr = el("input");
+    console::log_1(&JsValue::from("b3"));
+    tree_root.ref_push(el_async({
+        let addr = addr.weak();
+        let tree_root = tree_root.weak();
+        async move {
+            console::log_1(&JsValue::from("b4"));
+            let active_tab = get_active_tab().await.1;
+            console::log_1(&JsValue::from("b4b"));
+            let mut raw_paths = vec![];
+            let url = js_sys::Reflect::get(&active_tab, &JsValue::from("url")).unwrap().as_string().unwrap();
+            let url = Uri::from_str(&url).map_err(|e| format!("Unparsable URL: {}", e))?;
+            let Some(hostname) = url.host() else {
+                return Ok(el("div"));
+            };
+            let hostname_segs = hostname.split('.').collect::<Vec<_>>();
+            for i in 0 ..= hostname_segs.len() - 2 {
+                raw_paths.push(
+                    SpecificPath(
+                        vec![
+                            "web".to_string(),
+                            hostname_segs[hostname_segs.len() - 2 - i .. hostname_segs.len()].join(".")
+                        ],
+                    ).to_string(),
+                );
+            }
+            console::log_1(&JsValue::from("b5"));
+            let Some(addr) = addr.upgrade() else {
+                return Ok(el("div"));
+            };
+            addr.ref_attr("value", &raw_paths[0]);
+            console::log_1(&JsValue::from("b5b"));
+            let Some(tree_root) = tree_root.upgrade() else {
+                return Ok(el("div"));
+            };
+            update(&tree_root, raw_paths);
+            console::log_1(&JsValue::from("b5c"));
+            return Ok(el("div"));
+        }
+    }));
+    console::log_1(&JsValue::from("b6"));
+
+    fn update_from_addr(addr: &WeakEl, tree_root: &WeakEl) {
+        let Some(addr) = addr.upgrade() else {
+            return;
+        };
+        let Some(tree_root) = tree_root.upgrade() else {
+            return;
+        };
+        update(&tree_root, vec![addr.raw().dyn_ref::<HtmlInputElement>().unwrap().value()]);
+    }
+
     addr.ref_on("keyup", {
         let addr = addr.weak();
         let tree_root = tree_root.weak();
         move |_| {
-            let Some(addr) = addr.upgrade() else {
-                return;
-            };
-            let Some(tree_root) = tree_root.upgrade() else {
-                return;
-            };
-            update(&tree_root, vec![addr.raw().text_content().unwrap()]);
+            update_from_addr(&addr, &tree_root);
         }
     });
+    console::log_1(&JsValue::from("b7"));
     addr.ref_on("change", {
         let addr = addr.weak();
         let tree_root = tree_root.weak();
         move |_| {
-            let Some(addr) = addr.upgrade() else {
-                return;
-            };
-            let Some(tree_root) = tree_root.upgrade() else {
-                return;
-            };
-            update(&tree_root, vec![addr.raw().text_content().unwrap()]);
+            update_from_addr(&addr, &tree_root);
         }
     });
+    console::log_1(&JsValue::from("b8"));
     set_root(vec![addr, tree_root]);
+    console::log_1(&JsValue::from("b9"));
 }

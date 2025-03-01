@@ -49,6 +49,7 @@ async-tempfile = "0.7"
 passworth = { path = "../shared", features = ["native"] }
 zbase32 = "0.1"
 wasm-bindgen-cli-support = "=0.2.100"
+wasm2map = "0.1"
 
 [build-dependencies]
 good-ormning = { version = "0.3", features = ["sqlite", "chrono"] }

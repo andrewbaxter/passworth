@@ -1,12 +1,13 @@
 { pkgs, lib }:
 let
-  hoj = import ((fetchTarball "https://github.com/andrewbaxter/hammer-of-json/archive/d018015cd66e9ffff0c4960d0f892853696e9648.zip") + "/package.nix") { };
+  hoj = import ((fetchTarball "https://github.com/andrewbaxter/hammer-of-json/archive/4622456e0eeffd62380dbd88d648c28c8a3359d9.zip") + "/source/package.nix") { pkgs = pkgs; lib = lib; };
   fenix = import (fetchTarball "https://github.com/nix-community/fenix/archive/1a79901b0e37ca189944e24d9601c8426675de50.zip") { };
   naersk = pkgs.callPackage (fetchTarball "https://github.com/nix-community/naersk/archive/378614f37a6bee5a3f2ef4f825a73d948d3ae921.zip") (
     let
       toolchain = fenix.combine [
         fenix.latest.rustc
         fenix.latest.cargo
+        fenix.targets.wasm32-unknown-unknown.latest.rust-std
       ];
     in
     {
@@ -96,73 +97,91 @@ let
     root = ./wasm;
   };
   nativeId = "me.isandrew.passworth";
-  browserIdKeyChrome = "TODO";
-  browserIdChrome = "TODO";
-  browserIdFirefox = "TODO";
-  browser = derivation {
-    name = "posStatic";
+  extensionIdKeyChrome = "TODO";
+  extensionIdChrome = "TODO";
+  #extensionIdFirefox = "365d2ed012492eb0cff650b7e191c1da5488b5eb@temporary-addon";
+  extensionIdFirefox = "passworth@example.org";
+  extensionUnpacked = derivation {
+    name = "passworth-browser-unpacked";
     system = builtins.currentSystem;
     builder = "${pkgs.bash}/bin/bash";
     args = [
       (pkgs.writeText "browserBuilder" ''
         set -xeu
-        ${pkgs.coreutils}/bin/cp -r ${../skeleton} skeleton
+
+        cp () {
+          ${pkgs.coreutils}/bin/cp -r --no-preserve=all "$@"
+        }
+        merge () {
+          ${hoj}/bin/hoj "f:$1" merge "f:$2"
+        }
+        set () {
+          ${hoj}/bin/hoj --in-place "f:$1" search-set "\"$2\"" "\"$3\""
+        }
+
+        ${pkgs.coreutils}/bin/mkdir -p stage
+        cp ${./skeleton} skeleton
         
         # Assemble browser bits
         ${pkgs.coreutils}/bin/mkdir -p browser_stage
         ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/content.wasm --out-name content2 --out-dir browser_stage
-        ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/popup.wasm --out-name popup --out-dir browser_stage
+        ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/popup.wasm --out-name popup2 --out-dir browser_stage
 
-        ${pkgs.coreutils}/bin/cp -r skeleton/browser_static $out/browser_chrome
-        ${pkgs.coreutils}/bin/cp -r browser_stage/* $out/browser_chrome/
-        chrome_browser_manifest_path=out/browser_chrome/manifest.json
-        ${hoj}/bin/hoj f:skeleton/browser_manifest.json merge f:./skeleton/browser_manifest_chrome.json > $chrome_browser_manifest_path
-        ${hoj}/bin/hoj --in-place f:$chrome_browser_manifest_path replace '"_PLACEHOLDER_BROWSERIDKEY"' "${browserIdKeyChrome}"
+        cp skeleton/browser_static stage/browser_chrome
+        cp browser_stage/* stage/browser_chrome/
+        chrome_browser_manifest_path=stage/browser_chrome/manifest.json
+        merge skeleton/browser_manifest.json ./skeleton/browser_manifest_chrome.json > $chrome_browser_manifest_path
+        set $chrome_browser_manifest_path _PLACEHOLDER_BROWSERIDKEY '${extensionIdKeyChrome}'
         
-        ${pkgs.coreutils}/bin/cp -r skeleton/browser/static $out/browser_firefox
-        ${pkgs.coreutils}/bin/cp -r browser_stage/* $out/browser_firefox/
-        firefox_browser_manifest_path=out/browser_firefox/manifest.json
-        ${hoj}/bin/hoj f:skeleton/browser_manifest.json merge f:./skeleton/browser_manifest_firefox.json > $firefox_browser_manifest_path
-        ${hoj}/bin/hoj --in-place f:$firefox_browser_manifest_path replace '"_PLACEHOLDER_BROWSERID"' "${browserIdFirefox}"
+        cp skeleton/browser_static stage/browser_firefox
+        cp browser_stage/* stage/browser_firefox/
+        firefox_browser_manifest_path=stage/browser_firefox/manifest.json
+        merge skeleton/browser_manifest.json ./skeleton/browser_manifest_firefox.json > $firefox_browser_manifest_path
+        set $firefox_browser_manifest_path _PLACEHOLDER_BROWSERID '${extensionIdFirefox}'
 
         # Assemble native bits
-        ${pkgs.coreutils}/bin/mkdir -p $out/native
-        ${pkgs.coreutils}/bin/cp ${native}/bin/passworth-browser $out/native/binary
-        ${hoj}/bin/hoj --in-place f:skeleton/native_manifest.json replace '"_PLACEHOLDER_BINPATH"' "$out/native/binary"
-        ${hoj}/bin/hoj --in-place f:skeleton/native_manifest.json replace '"_PLACEHOLDER_NATIVEID"' "${nativeId}"
+        ${pkgs.coreutils}/bin/mkdir -p stage/native
+        cp ${native}/bin/passworth-browser stage/native/binary
+        set skeleton/native_manifest.json _PLACEHOLDER_BINPATH "$out/native/binary"
+        set skeleton/native_manifest.json _PLACEHOLDER_NATIVEID '${nativeId}'
 
-        ${hoj}/bin/hoj f:skeleton/native_manifest.json merge f:skeleton/native_manifest_chrome.json > $out/native/manifest_chrome.json
-        ${hoj}/bin/hoj --in-place f:$out/native/manifest_chrome.json replace '"_PLACEHOLDER_BROWSERID"' "chrome-extension://${browserIdChrome}/"
+        merge skeleton/native_manifest.json skeleton/native_manifest_chrome.json > stage/native/manifest_chrome.json
+        set stage/native/manifest_chrome.json _PLACEHOLDER_BROWSERID 'chrome-extension://${extensionIdChrome}/'
 
-        firefox_native_manifest_dir=$out/lib/mozilla/native-messaging-hosts/       
+        firefox_native_manifest_dir=stage/lib/mozilla/native-messaging-hosts/       
         ${pkgs.coreutils}/bin/mkdir -p $firefox_native_manifest_dir
-        ${hoj}/bin/hoj f:skeleton/native_manifest.json merge f:/skeleton/native_manifest_firefox.json > $firefox_native_manifest_dir/${nativeId}.json
-        ${hoj}/bin/hoj --in-place f:$firefox_native_manifest_dir/${nativeId}.json replace '"_PLACEHOLDER_BROWSERID"' "${browserIdFirefox}"
+        merge skeleton/native_manifest.json skeleton/native_manifest_firefox.json > $firefox_native_manifest_dir/${nativeId}.json
+        set $firefox_native_manifest_dir/${nativeId}.json _PLACEHOLDER_BROWSERID '${extensionIdFirefox}'
 
+        cp stage $out
+        ${pkgs.coreutils}/bin/chmod a+x $out/native/binary
+
+        ${pkgs.web-ext}/bin/web-ext lint --output json --pretty --self-hosted --source-dir $out/browser_firefox
       '')
     ];
   };
 in
 {
   package = native;
+  extensionUnpacked = extensionUnpacked;
   browserModule = { ... }: {
     config = {
       environment.etc = {
         # Locates binary, allows access from extensions
-        "chromium/native-messaging-hosts/${nativeId}.json".source = "${browser}/native/manifest_chrome.json";
-        "opt/chrome/native-messaging-hosts/${nativeId}.json".source = "${browser}/native/manifest_chrome.json";
-        "opt/vivaldi/native-messaging-hosts/${nativeId}.json".source = "${browser}/native/manifest_vivaldi.json";
-        "opt/brave/native-messaging-hosts/${nativeId}.json".source = "${browser}/native/manifest_brave.json";
+        "chromium/native-messaging-hosts/${nativeId}.json".source = "${extensionUnpacked}/native/manifest_chrome.json";
+        "opt/chrome/native-messaging-hosts/${nativeId}.json".source = "${extensionUnpacked}/native/manifest_chrome.json";
+        "opt/vivaldi/native-messaging-hosts/${nativeId}.json".source = "${extensionUnpacked}/native/manifest_vivaldi.json";
+        "opt/brave/native-messaging-hosts/${nativeId}.json".source = "${extensionUnpacked}/native/manifest_brave.json";
 
         # Installs extension, not sure why there's only one id
-        #"chromium/policies/managed/${nativeId}.json".source = "${browser}/browser/policy_chrome.json";
-        #"opt/chrome/policies/managed/${nativeId}.json".source = "${browser}/browser/policy_chrome.json";
-        #"opt/vivaldi/policies/managed/${nativeId}.json".source = "${browser}/browser/policy_chrome.json";
-        #"opt/brave/policies/managed/${nativeId}.json".source = "${browser}/browser/policy_chrome.json";
+        #"chromium/policies/managed/${nativeId}.json".source = "${extensionUnpacked}/browser/policy_chrome.json";
+        #"opt/chrome/policies/managed/${nativeId}.json".source = "${extensionUnpacked}/browser/policy_chrome.json";
+        #"opt/vivaldi/policies/managed/${nativeId}.json".source = "${extensionUnpacked}/browser/policy_chrome.json";
+        #"opt/brave/policies/managed/${nativeId}.json".source = "${extensionUnpacked}/browser/policy_chrome.json";
       };
 
       # Locates binary, allows access from extensions
-      programs.firefox.nativeMessagingHosts.packages = [ browser ];
+      programs.firefox.nativeMessagingHosts.packages = [ extensionUnpacked ];
     };
   };
 }
