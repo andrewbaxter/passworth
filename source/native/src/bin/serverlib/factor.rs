@@ -3,7 +3,7 @@ use {
         ea,
         Log,
     },
-    passworth::config::latest::{
+    passworth_native::config::latest::{
         ConfigAuthFactor,
         ConfigAuthFactorVariant,
         ConfigCredSmartcards,

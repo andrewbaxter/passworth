@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Passworth",
+  "description": "Fill username, password, OTP fields directly from Passworth",
+  "homepage_url": "https://github.com/andrewbaxter/passworth",
+  "version": "0.1.0",
+  "author": "Andrew Baxter",
+  "icons": {
+    "128": "icon.png",
+    "16": "icon16.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'self' 'wasm-unsafe-eval'"
+  },
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "nativeMessaging",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "browser_action": {
+    "default_icon": {
+      "16": "icon16.png"
+    },
+    "default_popup": "popup/popup.html"
+  },
+  "commands": {
+    "_execute_browser_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L"
+      }
+    }
+  }
+}

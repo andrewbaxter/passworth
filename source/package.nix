@@ -15,7 +15,7 @@ let
   );
 in
 naersk.buildPackage {
-  root = ./.;
+  root = ./native;
   nativeBuildInputs = [
     pkgs.pkg-config
     pkgs.cargo

@@ -38,15 +38,15 @@ use {
         ResultContext,
     },
     passworth::{
+        datapath::SpecificPath,
+        ipc,
+        utils::to_b32,
+    },
+    passworth_native::{
         config,
         crypto::pgp_from_armor,
-        datapath::SpecificPath,
         generate,
-        proto::{
-            self,
-            ipc_path,
-            to_b32,
-        },
+        proto::ipc_path,
     },
     sequoia_openpgp::{
         cert::CertBuilder,
@@ -542,7 +542,7 @@ async fn main2() -> Result<(), loga::Error> {
     // Start command server
     let activity = Arc::new(Notify::new());
     let ipc_path = ipc_path();
-    let mut ipc_server = proto::msg::Server::new(&ipc_path).await.map_err(loga::err)?;
+    let mut ipc_server = ipc::msg::Server::new(&ipc_path).await.map_err(loga::err)?;
     fs::set_permissions(&ipc_path, Permissions::from_mode(0o777))
         .await
         .map_err(loga::err)
@@ -729,7 +729,7 @@ async fn main2() -> Result<(), loga::Error> {
 
                         // Process request
                         while let Some(req) = conn.recv_req().await.map_err(loga::err)? {
-                            fn resp_unauthorized() -> Result<proto::msg::ServerResp, loga::Error> {
+                            fn resp_unauthorized() -> Result<ipc::msg::ServerResp, loga::Error> {
                                 return Err(loga::err("Unauthorized"));
                             }
 
@@ -737,7 +737,7 @@ async fn main2() -> Result<(), loga::Error> {
                             match async {
                                 let resp;
                                 match req {
-                                    proto::msg::ServerReq::Lock(rr, req) => {
+                                    ipc::msg::ServerReq::Lock(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -750,17 +750,17 @@ async fn main2() -> Result<(), loga::Error> {
                                             return resp_unauthorized();
                                         }
                                         match req.0 {
-                                            proto::LockAction::Lock => {
+                                            ipc::LockAction::Lock => {
                                                 state.token.lock().unwrap().token = None;
                                             },
-                                            proto::LockAction::Unlock => {
+                                            ipc::LockAction::Unlock => {
                                                 get_privdb(&state).await?;
                                                 activity.notify_one();
                                             },
                                         }
                                         resp = rr(());
                                     },
-                                    proto::msg::ServerReq::MetaKeys(rr, req) => {
+                                    ipc::msg::ServerReq::MetaKeys(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -806,7 +806,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         activity.notify_one();
                                         resp = rr(serde_json::to_value(&tree).unwrap());
                                     },
-                                    proto::msg::ServerReq::MetaRevisions(rr, req) => {
+                                    ipc::msg::ServerReq::MetaRevisions(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -854,7 +854,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         activity.notify_one();
                                         resp = rr(db_resp);
                                     },
-                                    proto::msg::ServerReq::MetaPgpPubkey(rr, req) => {
+                                    ipc::msg::ServerReq::MetaPgpPubkey(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -884,7 +884,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             );
                                         activity.notify_one();
                                     },
-                                    proto::msg::ServerReq::MetaSshPubkey(rr, req) => {
+                                    ipc::msg::ServerReq::MetaSshPubkey(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -912,7 +912,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             );
                                         activity.notify_one();
                                     },
-                                    proto::msg::ServerReq::Read(rr, req) => {
+                                    ipc::msg::ServerReq::Read(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -934,7 +934,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         activity.notify_one();
                                         resp = rr(serde_json::to_value(&tree).unwrap());
                                     },
-                                    proto::msg::ServerReq::Write(rr, req) => {
+                                    ipc::msg::ServerReq::Write(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -953,7 +953,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         activity.notify_one();
                                         resp = rr(());
                                     },
-                                    proto::msg::ServerReq::WriteMove(rr, req) => {
+                                    ipc::msg::ServerReq::WriteMove(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -980,7 +980,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         activity.notify_one();
                                         resp = rr(());
                                     },
-                                    proto::msg::ServerReq::WriteGenerate(rr, req) => {
+                                    ipc::msg::ServerReq::WriteGenerate(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -1001,31 +1001,31 @@ async fn main2() -> Result<(), loga::Error> {
                                             }
                                             let data;
                                             match req.variant {
-                                                passworth::proto::C2SGenerateVariant::Bytes(args) => {
+                                                ipc::C2SGenerateVariant::Bytes(args) => {
                                                     data =
                                                         serde_json::Value::String(
                                                             to_b32(&generate::gen_bytes(args.length)),
                                                         );
                                                 },
-                                                passworth::proto::C2SGenerateVariant::SafeAlphanumeric(args) => {
+                                                ipc::C2SGenerateVariant::SafeAlphanumeric(args) => {
                                                     data =
                                                         serde_json::Value::String(
                                                             generate::gen_safe_alphanum(args.length),
                                                         );
                                                 },
-                                                passworth::proto::C2SGenerateVariant::Alphanumeric(args) => {
+                                                ipc::C2SGenerateVariant::Alphanumeric(args) => {
                                                     data =
                                                         serde_json::Value::String(
                                                             generate::gen_alphanum(args.length),
                                                         );
                                                 },
-                                                passworth::proto::C2SGenerateVariant::AlphanumericSymbols(args) => {
+                                                ipc::C2SGenerateVariant::AlphanumericSymbols(args) => {
                                                     data =
                                                         serde_json::Value::String(
                                                             generate::gen_alphanum_symbols(args.length),
                                                         );
                                                 },
-                                                passworth::proto::C2SGenerateVariant::Pgp => {
+                                                ipc::C2SGenerateVariant::Pgp => {
                                                     let (cert, _) =
                                                         CertBuilder::new()
                                                             .set_cipher_suite(
@@ -1074,7 +1074,7 @@ async fn main2() -> Result<(), loga::Error> {
                                                             );
                                                     }
                                                 },
-                                                passworth::proto::C2SGenerateVariant::Ssh => {
+                                                ipc::C2SGenerateVariant::Ssh => {
                                                     let key =
                                                         ssh_key::PrivateKey::random(
                                                             &mut ssh_key::rand_core::OsRng,
@@ -1097,7 +1097,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         activity.notify_one();
                                         resp = rr(());
                                     },
-                                    proto::msg::ServerReq::WriteRevert(rr, req) => {
+                                    ipc::msg::ServerReq::WriteRevert(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -1119,7 +1119,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         activity.notify_one();
                                         resp = rr(());
                                     },
-                                    proto::msg::ServerReq::DerivePgpSign(rr, req) => {
+                                    ipc::msg::ServerReq::DerivePgpSign(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -1186,7 +1186,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             );
                                         activity.notify_one();
                                     },
-                                    proto::msg::ServerReq::DerivePgpDecrypt(rr, req) => {
+                                    ipc::msg::ServerReq::DerivePgpDecrypt(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -1290,7 +1290,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         activity.notify_one();
                                         resp = rr(decrypted);
                                     },
-                                    proto::msg::ServerReq::DeriveOtp(rr, req) => {
+                                    ipc::msg::ServerReq::DeriveOtp(rr, req) => {
                                         if !permission::permit(
                                             &log,
                                             state.fg_tx.clone(),
@@ -1323,7 +1323,7 @@ async fn main2() -> Result<(), loga::Error> {
                                 },
                                 Err(e) => {
                                     log.log_err(loga::WARN, e.context("Error processing request"));
-                                    resp = proto::msg::ServerResp::err("Encountered error processing request");
+                                    resp = ipc::msg::ServerResp::err("Encountered error processing request");
                                 },
                             };
                             conn.send_resp(resp).await.map_err(loga::err)?;

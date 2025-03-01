@@ -1,40 +1,12 @@
 use {
     crate::datapath::SpecificPath,
     glove::reqresp,
-    loga::ResultContext,
     schemars::JsonSchema,
     serde::{
         Deserialize,
         Serialize,
     },
-    std::{
-        env,
-        path::PathBuf,
-    },
 };
-
-pub const DEFAULT_SOCKET: &str = "/run/passworth.sock";
-pub const ENV_SOCKET: &str = "PASSWORTH_SOCK";
-
-pub fn to_b32(data: &[u8]) -> String {
-    return zbase32::encode_full_bytes(data);
-}
-
-pub fn from_b32(data: &String) -> Result<Vec<u8>, loga::Error> {
-    return Ok(
-        zbase32::decode_full_bytes_str(data)
-            .map_err(loga::err)
-            .context("Error decoding zbase32 encoded binary data")?,
-    );
-}
-
-pub fn ipc_path() -> PathBuf {
-    if let Some(v) = env::var_os(ENV_SOCKET) {
-        return PathBuf::from(v);
-    } else {
-        return PathBuf::from(DEFAULT_SOCKET);
-    }
-}
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

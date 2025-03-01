@@ -1,0 +1,8 @@
+{
+  "browser_action": {
+    "default_icon": {
+      "128": "icon.png"
+    }
+  },
+  "key": "_PLACEHOLDER_BROWSERIDKEY"
+}

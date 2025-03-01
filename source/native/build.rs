@@ -70,7 +70,7 @@ fn main() {
                     &mut latest_version,
                     "zLQI9HQUQ",
                     "data",
-                    field_str().custom("passworth::config::Config").build(),
+                    field_str().custom("passworth_native::config::Config").build(),
                 );
             table.constraint(
                 &mut latest_version,

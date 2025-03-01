@@ -1,7 +1,8 @@
 [package]
-name = "passworth"
+name = "passworth-native"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [dependencies]
 pcsc = "2"
@@ -25,6 +26,7 @@ tokio = { version = "1", features = [
     "net",
     "io-util",
     "process",
+    "io-std",
 ] }
 gtk4 = { version = "0.9", features = ["v4_12"] }
 tokio-stream = { version = "0.1", features = ["net"] }
@@ -34,17 +36,19 @@ chacha20poly1305 = "0.10"
 generic-array = { version = "0.14", features = ["serde"] }
 defer = "0.2"
 rand = "0.9"
-zbase32 = "0.1"
 include-lines = "1"
 users = "0.11"
 libsqlite3-sys = { version = "0.31", features = ["bundled-sqlcipher"] }
 flowcontrol = "0.2"
-glove = "0.1"
+glove = { version = "0.4", features = ["unix"] }
 schemars = "0.8"
 async-stream = "0.3"
 ssh-key = { version = "0.6", features = ["crypto"] }
-totp-rs = { version = "5.6.0", features = ["otpauth"] }
-async-tempfile = "0.7.0"
+totp-rs = { version = "5", features = ["otpauth"] }
+async-tempfile = "0.7"
+passworth = { path = "../shared", features = ["native"] }
+zbase32 = "0.1"
+wasm-bindgen-cli-support = "=0.2.100"
 
 [build-dependencies]
 good-ormning = { version = "0.3", features = ["sqlite", "chrono"] }

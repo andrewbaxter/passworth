@@ -12,6 +12,13 @@ use {
         ResultContext,
     },
     passworth::{
+        datapath::{
+            GlobPath,
+            GlobSeg,
+            SpecificPath,
+        },
+    },
+    passworth_native::{
         config::{
             latest::{
                 ConfigPermissionRule,
@@ -20,11 +27,6 @@ use {
                 UserGroupId,
             },
             v1::PermitLevel,
-        },
-        datapath::{
-            GlobPath,
-            GlobSeg,
-            SpecificPath,
         },
     },
     std::{
@@ -129,7 +131,7 @@ pub fn build_rule_tree(
             prompt: rule.prompt.clone(),
         });
         for path in &rule.paths {
-            let segs = GlobPath::from_str(path)?;
+            let segs = GlobPath::from_str(path).map_err(loga::err)?;
             let mut at = &mut rules;
             for seg in segs.0 {
                 match seg {

@@ -8,6 +8,17 @@ use {
         Aargvark,
     },
     async_tempfile::TempFile,
+    passworth::{
+        datapath::SpecificPath,
+        ipc::{
+            C2SGenerateVariant,
+            C2SGenerateVariantAlphanumeric,
+            C2SGenerateVariantAlphanumericSymbols,
+            C2SGenerateVariantBytes,
+            C2SGenerateVariantSafeAlphanumeric,
+        },
+        utils::to_b32,
+    },
     loga::{
         ea,
         fatal,
@@ -16,22 +27,13 @@ use {
         Log,
         ResultContext,
     },
-    passworth::{
+    passworth::ipc,
+    passworth_native::{
         crypto::{
             get_card_pubkey,
             CardStream,
         },
-        datapath::SpecificPath,
-        proto::{
-            self,
-            ipc_path,
-            to_b32,
-            C2SGenerateVariant,
-            C2SGenerateVariantAlphanumeric,
-            C2SGenerateVariantAlphanumericSymbols,
-            C2SGenerateVariantBytes,
-            C2SGenerateVariantSafeAlphanumeric,
-        },
+        proto::ipc_path,
     },
     std::{
         io::{
@@ -46,6 +48,12 @@ use {
         AsyncWriteExt,
     },
 };
+
+async fn req<T: ipc::msg::ReqTrait>(body: T) -> Result<T::Resp, loga::Error> {
+    return Ok(
+        ipc::msg::Client::new(ipc_path()).await.map_err(loga::err)?.send_req(body).await.map_err(loga::err)?,
+    );
+}
 
 #[derive(Aargvark)]
 struct GenerateVariantBytes {
@@ -199,7 +207,7 @@ struct RevertCommand {
 #[vark(break_help)]
 enum Command {
     /// Execute a JSON IPC command directly (see ipc jsonschema).
-    Json(AargvarkJson<proto::msg::Req>),
+    Json(AargvarkJson<ipc::msg::Req>),
     /// Trigger unlock and wait for it to complete.
     Unlock,
     /// Trigger lock and wait for it to complete.
@@ -249,18 +257,12 @@ enum Command {
     ScanCards,
 }
 
-async fn req<T: proto::msg::ReqTrait>(body: T) -> Result<T::Resp, loga::Error> {
-    return Ok(
-        proto::msg::Client::new(ipc_path()).await.map_err(loga::err)?.send_req(body).await.map_err(loga::err)?,
-    );
-}
-
 async fn main2() -> Result<(), loga::Error> {
     let log = Log::new_root(loga::INFO);
     match vark::<Command>() {
         Command::Json(args) => {
             let resp =
-                proto::msg::Client::new(ipc_path())
+                ipc::msg::Client::new(ipc_path())
                     .await
                     .map_err(loga::err)?
                     .send_req_enum(&args.value)
@@ -276,13 +278,13 @@ async fn main2() -> Result<(), loga::Error> {
             );
         },
         Command::Unlock => {
-            req(proto::ReqLock(proto::LockAction::Unlock)).await?;
+            req(ipc::ReqLock(ipc::LockAction::Unlock)).await?;
         },
         Command::Lock => {
-            req(proto::ReqLock(proto::LockAction::Lock)).await?;
+            req(ipc::ReqLock(ipc::LockAction::Lock)).await?;
         },
         Command::MetaKeys(args) => {
-            let mut res = req(proto::ReqMetaKeys {
+            let mut res = req(ipc::ReqMetaKeys {
                 paths: vec![args.path.clone()],
                 at: args.revision,
             }).await?;
@@ -303,21 +305,21 @@ async fn main2() -> Result<(), loga::Error> {
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
         Command::MetaPgpPubkey(args) => {
-            let res = req(proto::ReqMetaPgpPubkey {
+            let res = req(ipc::ReqMetaPgpPubkey {
                 path: args.path,
                 at: args.revision,
             }).await?;
             println!("{}", res);
         },
         Command::MetaSshPubkey(args) => {
-            let res = req(proto::ReqMetaSshPubkey {
+            let res = req(ipc::ReqMetaSshPubkey {
                 path: args.path,
                 at: args.revision,
             }).await?;
             println!("{}", res);
         },
         Command::Read(args) => {
-            let mut res = req(proto::ReqRead {
+            let mut res = req(ipc::ReqRead {
                 paths: vec![args.path.clone()],
                 at: args.revision,
             }).await?;
@@ -348,7 +350,7 @@ async fn main2() -> Result<(), loga::Error> {
             }
         },
         Command::ReadRevisions(args) => {
-            let res = req(proto::ReqMetaRevisions {
+            let res = req(ipc::ReqMetaRevisions {
                 paths: args.paths,
                 at: args.revision,
             }).await?;
@@ -364,7 +366,7 @@ async fn main2() -> Result<(), loga::Error> {
             } else {
                 serde_json::Value::String(String::from_utf8(data).context("Error parsing value as UTF-8")?)
             };
-            req(proto::ReqWrite(vec![(args.path, data)])).await?;
+            req(ipc::ReqWrite(vec![(args.path, data)])).await?;
         },
         Command::WriteEdit(args) => {
             const ENV_EDITOR: &str = "SECURE_EDITOR";
@@ -373,7 +375,7 @@ async fn main2() -> Result<(), loga::Error> {
             };
 
             // Get existing data
-            let mut res = req(proto::ReqRead {
+            let mut res = req(ipc::ReqRead {
                 paths: vec![args.path.clone()],
                 at: None,
             }).await?;
@@ -447,23 +449,23 @@ async fn main2() -> Result<(), loga::Error> {
                     }
                 },
             };
-            req(proto::ReqWrite(vec![(args.path, data)])).await?;
+            req(ipc::ReqWrite(vec![(args.path, data)])).await?;
         },
         Command::WriteMove(args) => {
-            req(proto::ReqWriteMove {
+            req(ipc::ReqWriteMove {
                 from: args.from,
                 to: args.to,
                 overwrite: args.overwrite.is_some(),
             }).await?;
         },
         Command::WriteRevert(args) => {
-            req(proto::ReqWriteRevert {
+            req(ipc::ReqWriteRevert {
                 paths: args.paths,
                 at: args.revision,
             }).await?;
         },
         Command::WriteGenerate(args) => {
-            req(proto::ReqWriteGenerate {
+            req(ipc::ReqWriteGenerate {
                 path: args.path,
                 variant: match args.variant {
                     GenerateVariant::Bytes(args) => C2SGenerateVariant::Bytes(
@@ -485,7 +487,7 @@ async fn main2() -> Result<(), loga::Error> {
             }).await?;
         },
         Command::DerivePgpSign(args) => {
-            let res = req(proto::ReqDerivePgpSign {
+            let res = req(ipc::ReqDerivePgpSign {
                 key: args.key,
                 data: args.data.value,
             }).await?;
@@ -493,7 +495,7 @@ async fn main2() -> Result<(), loga::Error> {
             std::io::stdout().flush().unwrap();
         },
         Command::DerivePgpDecrypt(args) => {
-            let res = req(proto::ReqDerivePgpDecrypt {
+            let res = req(ipc::ReqDerivePgpDecrypt {
                 key: args.key,
                 data: args.data.value,
             }).await?;
@@ -501,7 +503,7 @@ async fn main2() -> Result<(), loga::Error> {
             std::io::stdout().flush().unwrap();
         },
         Command::DeriveOtp(args) => {
-            let res = req(proto::ReqDeriveOtp { key: args.key }).await?;
+            let res = req(ipc::ReqDeriveOtp { key: args.key }).await?;
             std::io::stdout().write_all(res.as_bytes()).unwrap();
             std::io::stdout().flush().unwrap();
         },
@@ -512,11 +514,11 @@ async fn main2() -> Result<(), loga::Error> {
                     Ok(x) => x,
                     Err(e) => {
                         let e = match e {
-                            passworth::error::UiErr::Internal(i) => i,
-                            passworth::error::UiErr::External(e, i) => {
+                            passworth_native::error::UiErr::Internal(i) => i,
+                            passworth_native::error::UiErr::External(e, i) => {
                                 i.unwrap_or(loga::err(&e))
                             },
-                            passworth::error::UiErr::InternalUnresolvable(e) => e,
+                            passworth_native::error::UiErr::InternalUnresolvable(e) => e,
                         };
                         log.log_err(loga::WARN, e.context("Error getting gpg key for card"));
                         continue;

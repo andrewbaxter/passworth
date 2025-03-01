@@ -2,13 +2,16 @@
 //! the representations of a path with an "empty segment", a path with two "empty
 //! segments" and an "empty path" unambiguous while remaining moderately usable.
 use {
-    aargvark::traits_impls::AargvarkFromStr,
     schemars::JsonSchema,
     serde::{
         Deserialize,
         Serialize,
     },
     std::str::FromStr,
+};
+#[cfg(feature = "native")]
+use {
+    aargvark::traits_impls::AargvarkFromStr,
 };
 
 struct Reader {
@@ -42,15 +45,23 @@ impl Reader {
 #[serde(rename = "snake_case", deny_unknown_fields)]
 pub struct SpecificPath(pub Vec<String>);
 
+impl SpecificPath {
+    pub fn child(&self, sub: impl ToString) -> SpecificPath {
+        let mut out = self.0.clone();
+        out.push(sub.to_string());
+        return SpecificPath(out);
+    }
+}
+
 impl FromStr for SpecificPath {
-    type Err = loga::Error;
+    type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut path = Reader::new(s);
         let mut out = vec![];
         while let Some((i, c)) = path.eat() {
             if c != '/' {
-                return Err(loga::err(format!("Path segment missing leading slash at {}", i)));
+                return Err(format!("Path segment missing leading slash at {}", i));
             }
             let mut buf = vec![];
             let mut escape = false;
@@ -92,6 +103,7 @@ impl ToString for SpecificPath {
     }
 }
 
+#[cfg(feature = "native")]
 impl AargvarkFromStr for SpecificPath {
     fn from_str(s: &str) -> Result<Self, String> {
         return Ok(<SpecificPath as FromStr>::from_str(s).map_err(|e| e.to_string())?);
@@ -116,14 +128,14 @@ pub enum GlobSeg {
 pub struct GlobPath(pub Vec<GlobSeg>);
 
 impl FromStr for GlobPath {
-    type Err = loga::Error;
+    type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut path = Reader::new(s);
         let mut out = vec![];
         while let Some((i, c)) = path.eat() {
             if c != '/' {
-                return Err(loga::err(format!("Path segment missing leading slash at {}", i)));
+                return Err(format!("Path segment missing leading slash at {}", i));
             }
             let mut buf = vec![];
             let mut escape = false;

@@ -36,7 +36,7 @@ use {
         ResultContext,
     },
     openpgp_card_sequoia::state::Open,
-    passworth::{
+    passworth_native::{
         config::latest::ConfigCredSmartcards,
         crypto::{
             self,
