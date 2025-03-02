@@ -8,6 +8,7 @@ use {
             LocalStorage,
             Storage,
         },
+        timers::callback::Timeout,
         utils::{
             format::JsValueSerdeExt,
             window,
@@ -37,7 +38,6 @@ use {
         el,
         set_root,
         El,
-        WeakEl,
     },
     serde::Serialize,
     serde_json::json,
@@ -455,32 +455,28 @@ fn main() {
             return Ok(el("div"));
         }
     }));
-
-    fn update_from_addr(state: &Rc<State>, addr: &WeakEl, tree_root: &WeakEl) {
-        let Some(addr) = addr.upgrade() else {
-            return;
-        };
-        let Some(tree_root) = tree_root.upgrade() else {
-            return;
-        };
-        let addr = addr.raw().dyn_into::<HtmlInputElement>().unwrap();
-        update(&state, &tree_root, addr.value());
-    }
-
-    addr.ref_on("keyup", {
+    addr.ref_on("input", {
         let addr = addr.weak();
         let tree_root = tree_root.weak();
         let state = state.clone();
+
+        // underscore makes various lints not apply (?) - they were wrong anyway, and
+        // `allow(...)` wasn't entirely working, plus application bugs (expr vs
+        // statement...)
+        let mut _input_debounce = None;
         move |_| {
-            update_from_addr(&state, &addr, &tree_root);
-        }
-    });
-    addr.ref_on("change", {
-        let addr = addr.weak();
-        let tree_root = tree_root.weak();
-        let state = state.clone();
-        move |_| {
-            update_from_addr(&state, &addr, &tree_root);
+            let Some(addr) = addr.upgrade() else {
+                return;
+            };
+            let Some(tree_root) = tree_root.upgrade() else {
+                return;
+            };
+            _input_debounce = Some(Timeout::new(300, {
+                let state = state.clone();
+                move || {
+                    update(&state, &tree_root, addr.raw().dyn_into::<HtmlInputElement>().unwrap().value());
+                }
+            }));
         }
     });
     set_root(vec![addr, tree_root]);
