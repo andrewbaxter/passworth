@@ -123,18 +123,17 @@ let
         cp ${./skeleton} skeleton
         
         # Assemble browser bits
-        ${pkgs.coreutils}/bin/mkdir -p browser_stage
-        ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/content.wasm --out-name content2 --out-dir browser_stage
-        ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/popup.wasm --out-name popup2 --out-dir browser_stage
+        ${pkgs.coreutils}/bin/mkdir -p browser_wasm
+        ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/popup.wasm --out-name popup2 --out-dir browser_wasm
 
-        cp skeleton/browser_static stage/browser_chrome
-        cp browser_stage/* stage/browser_chrome/
+        cp skeleton/ext_static stage/browser_chrome
+        cp browser_wasm/* stage/browser_chrome/
         chrome_browser_manifest_path=stage/browser_chrome/manifest.json
         merge skeleton/browser_manifest.json ./skeleton/browser_manifest_chrome.json > $chrome_browser_manifest_path
         set $chrome_browser_manifest_path _PLACEHOLDER_BROWSERIDKEY '${extensionIdKeyChrome}'
         
-        cp skeleton/browser_static stage/browser_firefox
-        cp browser_stage/* stage/browser_firefox/
+        cp skeleton/ext_static stage/browser_firefox
+        cp browser_wasm/* stage/browser_firefox/
         firefox_browser_manifest_path=stage/browser_firefox/manifest.json
         merge skeleton/browser_manifest.json ./skeleton/browser_manifest_firefox.json > $firefox_browser_manifest_path
         set $firefox_browser_manifest_path _PLACEHOLDER_BROWSERID '${extensionIdFirefox}'

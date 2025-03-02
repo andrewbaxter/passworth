@@ -1,7 +1,17 @@
 use {
-    gloo::utils::{
-        format::JsValueSerdeExt,
-        window,
+    gloo::{
+        events::{
+            EventListener,
+            EventListenerOptions,
+        },
+        storage::{
+            LocalStorage,
+            Storage,
+        },
+        utils::{
+            format::JsValueSerdeExt,
+            window,
+        },
     },
     http::Uri,
     js_sys::{
@@ -20,6 +30,8 @@ use {
         js_call2,
         js_get,
         ToContent,
+        ToContentField,
+        ToContentUserPassword,
     },
     rooting::{
         el,
@@ -30,7 +42,9 @@ use {
     serde::Serialize,
     serde_json::json,
     std::{
+        cell::RefCell,
         future::Future,
+        rc::Rc,
         str::FromStr,
     },
     wasm_bindgen::{
@@ -43,20 +57,32 @@ use {
     },
     web_sys::{
         console,
+        HtmlElement,
         HtmlInputElement,
+        KeyboardEvent,
     },
 };
 
-const ICON_CLOCK: &str = "clock";
-const ICON_FIELD: &str = "field";
-const ICON_PERSON: &str = "person";
+const ICON_CLOCK: &str = "&#xe8b5";
+const ICON_FIELD: &str = "&#xf51d";
+const ICON_PERSON: &str = "&#xe7fd";
+const CLASS_VBOX: &str = "g_vbox";
+const CLASS_HBOX: &str = "g_hbox";
+const CLASS_GROUP: &str = "g_group";
+const CLASS_ASYNC: &str = "g_async";
+const CLASS_ERROR: &str = "g_err";
+const CLASS_ACTION_FOCUS: &str = "s_action_focus";
 
 fn el_block_err(text: impl AsRef<str>) -> El {
-    return el("div").classes(&["err"]).text(text.as_ref());
+    return el("div").classes(&[CLASS_ERROR]).text(text.as_ref());
+}
+
+fn el_block_text(text: impl AsRef<str>) -> El {
+    return el("p").text(text.as_ref());
 }
 
 fn el_async(work: impl Future<Output = Result<El, String>> + 'static) -> El {
-    return el("div").classes(&["g_async"]).own(move |el_| {
+    return el("div").classes(&[CLASS_ASYNC]).own(move |el_| {
         let el_ = el_.weak();
         spawn_local(async move {
             let work = work.await;
@@ -72,32 +98,54 @@ fn el_async(work: impl Future<Output = Result<El, String>> + 'static) -> El {
 }
 
 fn el_vbox() -> El {
-    return el("div").classes(&["g_vbox"]);
+    return el("div").classes(&[CLASS_VBOX]);
 }
 
 fn el_hbox() -> El {
-    return el("div").classes(&["g_hbox"]);
+    return el("div").classes(&[CLASS_HBOX]);
 }
 
 fn el_group() -> El {
-    return el("div").classes(&["g_group"]);
+    return el("div").classes(&[CLASS_GROUP]);
 }
 
-fn el_icon_button<
+struct State {
+    origin: RefCell<Option<String>>,
+    search_path: RefCell<Option<SpecificPath>>,
+    focus: RefCell<Option<El>>,
+}
+
+fn save_search_path(state: &Rc<State>) {
+    let Some(origin) = &*state.origin.borrow() else {
+        return;
+    };
+    let Some(search_path) = &*state.search_path.borrow() else {
+        return;
+    };
+    if let Err(e) = LocalStorage::set(&origin, &search_path.to_string()) {
+        console::log_1(
+            &JsValue::from(
+                format!("Error saving search path [{}] for origin [{}]: {}", search_path.to_string(), origin, e),
+            ),
+        );
+    }
+}
+
+fn el_choice_button<
     Ft: 'static + Future<Output = Result<(), String>>,
     F: 'static + Fn() -> Ft,
->(icon: &str, help: &str, action: F) -> El {
+>(state: &Rc<State>, icon: &str, help: &str, action: F) -> El {
     let out = el("button");
-    out.ref_classes(&["g_icon_button"]);
+    out.ref_classes(&["g_icon_button", "s_choice_button"]);
     out.ref_attr("title", help);
-    out.ref_text(icon);
+    out.raw().set_inner_html(icon);
     out.ref_on("click", {
         let out = out.weak();
         move |_| {
             let Some(out) = out.upgrade() else {
                 return;
             };
-            out.ref_classes(&["g_async"]);
+            out.ref_classes(&[CLASS_ASYNC]);
             spawn_local({
                 let out = out.weak();
                 let action = action();
@@ -110,28 +158,50 @@ fn el_icon_button<
                     let Some(out) = out.upgrade() else {
                         return;
                     };
-                    out.ref_remove_classes(&["g_async"]);
+                    out.ref_remove_classes(&[CLASS_ASYNC]);
                 }
             });
         }
     });
+    out.ref_own(
+        |button| EventListener::new_with_options(&window(), "focus", EventListenerOptions::run_in_capture_phase(), {
+            let button = button.weak();
+            let state = state.clone();
+            move |_| {
+                let Some(button) = button.upgrade() else {
+                    return;
+                };
+                if let Some(focus) = state.focus.borrow_mut().take() {
+                    focus.ref_remove_classes(&[CLASS_ACTION_FOCUS]);
+                }
+                button.ref_classes(&[CLASS_ACTION_FOCUS]);
+                *state.focus.borrow_mut() = Some(button);
+            }
+        }),
+    );
+    if state.focus.borrow().is_none() {
+        *state.focus.borrow_mut() = Some(out.clone());
+        out.ref_classes(&[CLASS_ACTION_FOCUS]);
+    }
     return out;
 }
 
 async fn send_to_native<T: ipc::msg::ReqTrait>(message: T) -> Result<T::Resp, String> {
-    let arg1 = JsValue::from("me.isandrew.passworth");
-    console::log_2(&JsValue::from("send_to_native0"), &arg1);
     let message = message.to_enum();
-    let arg2 = JsValue::from_serde(&message).unwrap();
-    console::log_2(&JsValue::from("send_to_native0 arg2"), &arg2);
-    let call_res =
-        js_call2(&js_get(&browser(), "runtime"), "sendNativeMessage", &arg1, &arg2).dyn_into::<Promise>().unwrap();
-    console::log_2(&JsValue::from("send_to_native1 call res"), &call_res);
-    let call_res = JsFuture::from(call_res).await.unwrap();
-    console::log_2(&JsValue::from("send_to_native1 call res2"), &call_res);
-    let x = JsValue::into_serde::<glove::Resp<T::Resp>>(&call_res).unwrap();
-    console::log_1(&JsValue::from(format!("Got native response: {}", serde_json::to_string_pretty(&x).unwrap())));
-    match x {
+    match JsValue::into_serde::<glove::Resp<T::Resp>>(
+        &JsFuture::from(
+            js_call2(
+                &js_get(&browser(), "runtime"),
+                "sendNativeMessage",
+                &JsValue::from("me.isandrew.passworth"),
+                &JsValue::from_serde(&message).unwrap(),
+            )
+                .dyn_into::<Promise>()
+                .unwrap(),
+        )
+            .await
+            .unwrap(),
+    ).unwrap() {
         glove::Resp::Ok(v) => return Ok(v),
         glove::Resp::Err(v) => return Err(
             format!(
@@ -144,20 +214,13 @@ async fn send_to_native<T: ipc::msg::ReqTrait>(message: T) -> Result<T::Resp, St
 }
 
 async fn get_active_tab() -> (JsValue, JsValue) {
-    console::log_1(&JsValue::from("z0"));
-    let browser = browser();
-    console::log_1(&JsValue::from("z0b"));
-    let tabs = js_get(&browser, "tabs");
-    console::log_1(&JsValue::from("z1"));
-    let query_res = JsFuture::from(js_call(&tabs, "query", &JsValue::from_serde(&json!({
+    let tabs = js_get(&browser(), "tabs");
+    for tab in JsFuture::from(js_call(&tabs, "query", &JsValue::from_serde(&json!({
         "currentWindow": true,
         "active": true,
-    })).unwrap()).dyn_into::<Promise>().unwrap()).await.unwrap();
-    console::log_1(&JsValue::from("z2"));
-    for tab in query_res.dyn_into::<Array>().unwrap() {
+    })).unwrap()).dyn_into::<Promise>().unwrap()).await.unwrap().dyn_into::<Array>().unwrap() {
         return (tabs, tab);
     }
-    console::log_1(&JsValue::from("z3"));
     panic!("Couldn't find active tab");
 }
 
@@ -171,206 +234,254 @@ async fn send_to_content(message: impl Serialize) {
     );
 }
 
-fn update(tree_root: &El, raw_paths: Vec<String>) {
-    let mut paths = vec![];
-    for raw_path in raw_paths {
-        let Ok(path) = SpecificPath::from_str(&raw_path) else {
-            continue;
-        };
-        paths.push(path);
-    }
-    if paths.is_empty() {
+fn update(state: &Rc<State>, tree_root: &El, raw_path: String) {
+    let Ok(path) = SpecificPath::from_str(&raw_path) else {
         return;
-    }
+    };
+    *state.search_path.borrow_mut() = Some(path.clone());
+    *state.focus.borrow_mut() = None;
     tree_root.ref_clear();
-    tree_root.ref_push(el_async(async move {
-        console::log_1(&JsValue::from("TT0"));
-        let raw_tree = send_to_native(ipc::ReqMetaKeys {
-            paths: paths,
-            at: None,
-        }).await?;
-        console::log_1(&JsValue::from("TT1"));
-        let new_tree = el_vbox();
+    tree_root.ref_push(el_async({
+        let state = state.clone();
+        async move {
+            let mut raw_tree = send_to_native(ipc::ReqMetaKeys {
+                paths: vec![path.clone()],
+                at: None,
+            }).await?;
+            for seg in &path.0 {
+                let serde_json::Value::Object(mut t) = raw_tree else {
+                    return Err(format!("Response missing path prefix"));
+                };
+                let Some(t) = t.remove(seg) else {
+                    return Err(format!("Response missing path prefix"));
+                };
+                raw_tree = t;
+            }
+            let new_tree = el_vbox().classes(&["s_choices"]);
 
-        fn build_row(path: SpecificPath, actions: Vec<El>) -> El {
-            return el("div")
-                .classes(&["s_tree_row"])
-                .push(el("span").text(&path.to_string()))
-                .push(el_hbox().extend(actions));
-        }
+            fn build_row(path: SpecificPath, actions: Vec<El>) -> El {
+                let mut head = path.0.clone();
+                head.pop();
+                let head = SpecificPath(head).to_string();
+                let tail = SpecificPath(path.0.last().iter().map(|x| x.to_string()).collect()).to_string();
+                let mut head = head.as_str();
+                let mut tail = tail.as_str();
+                if head.is_empty() {
+                    tail = tail.strip_prefix("/").unwrap_or(tail);
+                } else {
+                    head = head.strip_prefix("/").unwrap_or(head);
+                }
+                return el("div")
+                    .classes(&["s_choice"])
+                    .push(
+                        el_hbox()
+                            .classes(&["s_choice_label"])
+                            .push(el("span").classes(&["s_choice_label_head"]).text(head))
+                            .push(el("span").classes(&["s_choice_label_tail"]).text(tail)),
+                    )
+                    .push(el_hbox().classes(&["s_choice_buttons"]).extend(actions));
+            }
 
-        fn build_leaf(path: SpecificPath) -> El {
-            let mut actions = vec![el_icon_button(ICON_FIELD, "Put value in text field", {
-                let path = path.clone();
-                move || {
+            fn build_leaf(state: &Rc<State>, path: SpecificPath) -> El {
+                let mut actions = vec![el_choice_button(state, ICON_FIELD, "Put value in text field", {
                     let path = path.clone();
-                    async move {
-                        let resp = send_to_native(ipc::ReqRead {
-                            paths: vec![path],
-                            at: None,
-                        }).await?;
-                        send_to_content(ToContent::FillField(force_string(&resp))).await;
-                        window().close().unwrap();
-                        return Ok(());
+                    let state = state.clone();
+                    move || {
+                        let path = path.clone();
+                        let state = state.clone();
+                        async move {
+                            save_search_path(&state);
+                            let resp = send_to_native(ipc::ReqRead {
+                                paths: vec![path],
+                                at: None,
+                            }).await?;
+                            send_to_content(
+                                ToContent::FillField(ToContentField { text: force_string(&resp) }),
+                            ).await;
+                            window().close().unwrap();
+                            return Ok(());
+                        }
+                    }
+                })];
+                if let Some(last) = path.0.last() {
+                    if last == "otp" {
+                        actions.push(el_choice_button(state, ICON_CLOCK, "Put fresh OTP token in text field", {
+                            let path = path.clone();
+                            let state = state.clone();
+                            move || {
+                                let path = path.clone();
+                                let state = state.clone();
+                                async move {
+                                    save_search_path(&state);
+                                    let resp = send_to_native(ipc::ReqDeriveOtp { key: path }).await?;
+                                    send_to_content(ToContent::FillField(ToContentField { text: resp })).await;
+                                    window().close().unwrap();
+                                    return Ok(());
+                                }
+                            }
+                        }));
                     }
                 }
-            })];
-            if let Some(last) = path.0.last() {
-                if last == "otp" {
-                    actions.push(el_icon_button(ICON_CLOCK, "Put fresh OTP token in text field", {
-                        let path = path.clone();
+                return build_row(path, actions);
+            }
+
+            fn build_group(state: &Rc<State>, path: SpecificPath, user_field: bool) -> El {
+                return build_row(
+                    path.clone(),
+                    vec![el_choice_button(state, ICON_PERSON, "Auto-fill user and password", {
+                        let state = state.clone();
                         move || {
+                            let state = state.clone();
                             let path = path.clone();
                             async move {
-                                let resp = send_to_native(ipc::ReqDeriveOtp { key: path }).await?;
-                                send_to_content(ToContent::FillField(resp)).await;
+                                save_search_path(&state);
+                                let password_path = path.child("password");
+                                let mut req_paths = vec![password_path.clone()];
+                                let user_path = path.child("user");
+                                if user_field {
+                                    req_paths.push(user_path.clone());
+                                }
+                                let resp = send_to_native(ipc::ReqRead {
+                                    paths: req_paths,
+                                    at: None,
+                                }).await?;
+                                let user;
+                                if user_field {
+                                    user = dig(&resp, user_path.0.iter()).unwrap().clone();
+                                } else {
+                                    user = serde_json::Value::String(path.0.last().unwrap().clone());
+                                }
+                                send_to_content(ToContent::FillUserPassword(ToContentUserPassword {
+                                    user: force_string(&user),
+                                    password: force_string(dig(&resp, password_path.0.iter()).unwrap()),
+                                })).await;
                                 window().close().unwrap();
                                 return Ok(());
                             }
                         }
-                    }));
-                }
+                    })],
+                );
             }
-            return build_row(path, actions);
-        }
 
-        fn build_group(path: SpecificPath, user_field: bool) -> El {
-            return build_row(path.clone(), vec![el_icon_button(ICON_PERSON, "Auto-fill user and password", {
-                move || {
-                    let path = path.clone();
-                    async move {
-                        let password_path = path.child("password");
-                        let mut req_paths = vec![password_path.clone()];
-                        let user_path = path.child("user");
-                        if user_field {
-                            req_paths.push(user_path.clone());
+            match raw_tree {
+                serde_json::Value::Object(map) => {
+                    fn recurse(
+                        state: &Rc<State>,
+                        out: &El,
+                        at: serde_json::Map<String, serde_json::Value>,
+                        path: &mut Vec<String>,
+                    ) {
+                        if at.contains_key("password") {
+                            out.ref_push(build_group(state, SpecificPath(path.clone()), at.contains_key("user")));
                         }
-                        let resp = send_to_native(ipc::ReqRead {
-                            paths: req_paths,
-                            at: None,
-                        }).await?;
-                        let user;
-                        if user_field {
-                            user = dig(&resp, user_path.0.iter()).unwrap().clone();
-                        } else {
-                            user = serde_json::Value::String(path.0.last().unwrap().clone());
+                        for (k, v) in at {
+                            path.push(k);
+                            if let serde_json::Value::Object(at2) = v {
+                                recurse(state, out, at2, path);
+                            } else {
+                                out.ref_push(build_leaf(state, SpecificPath(path.clone())));
+                            }
+                            path.pop();
                         }
-                        send_to_content(
-                            ToContent::FillUserPassword(
-                                force_string(&user),
-                                force_string(dig(&resp, password_path.0.iter()).unwrap()),
-                            ),
-                        ).await;
-                        window().close().unwrap();
-                        return Ok(());
                     }
-                }
-            })]);
-        }
 
-        match raw_tree {
-            serde_json::Value::Object(map) => {
-                fn recurse(out: &El, at: serde_json::Map<String, serde_json::Value>, path: &mut Vec<String>) {
-                    if at.contains_key("password") {
-                        out.ref_push(build_group(SpecificPath(path.clone()), at.contains_key("user")));
-                    }
-                    for (k, v) in at {
-                        path.push(k);
-                        if let serde_json::Value::Object(at2) = v {
-                            recurse(out, at2, path);
-                        } else {
-                            out.ref_push(build_leaf(SpecificPath(path.clone())));
-                        }
-                        path.pop();
-                    }
-                }
-
-                recurse(&new_tree, map, &mut vec![]);
-            },
-            serde_json::Value::Null => {
-                new_tree.ref_push(el_block_err("No results"));
-            },
-            _ => {
-                new_tree.ref_push(build_leaf(SpecificPath(vec![])));
-            },
+                    recurse(&state, &new_tree, map, &mut vec![]);
+                },
+                serde_json::Value::Null => {
+                    return Ok(el_block_text("No results"));
+                },
+                _ => {
+                    return Err(format!("Response included non-null leaf values"));
+                },
+            }
+            return Ok(new_tree);
         }
-        return Ok(new_tree);
     }));
 }
 
 fn main() {
     console_error_panic_hook::set_once();
-    console::log_1(&JsValue::from("b1"));
-    let tree_root = el_group();
-    console::log_1(&JsValue::from("b2"));
-    let addr = el("input");
-    console::log_1(&JsValue::from("b3"));
+    let state = Rc::new(State {
+        origin: RefCell::new(None),
+        search_path: RefCell::new(None),
+        focus: RefCell::new(None),
+    });
+    let tree_root =
+        el_group().own(
+            |_| EventListener::new_with_options(&window(), "keydown", EventListenerOptions::run_in_capture_phase(), {
+                let state = state.clone();
+                move |ev| {
+                    let ev = ev.dyn_ref::<KeyboardEvent>().unwrap();
+                    if ev.code().to_ascii_lowercase() != "enter" {
+                        return;
+                    }
+                    let Some(focus) = state.focus.borrow_mut().clone() else {
+                        return;
+                    };
+                    focus.raw().dyn_into::<HtmlElement>().unwrap().click();
+                    ev.prevent_default();
+                    ev.set_cancel_bubble(true);
+                }
+            }),
+        );
+    let addr = el("input").classes(&["s_location"]);
     tree_root.ref_push(el_async({
         let addr = addr.weak();
         let tree_root = tree_root.weak();
+        let state = state.clone();
         async move {
-            console::log_1(&JsValue::from("b4"));
             let active_tab = get_active_tab().await.1;
-            console::log_1(&JsValue::from("b4b"));
-            let mut raw_paths = vec![];
             let url = js_sys::Reflect::get(&active_tab, &JsValue::from("url")).unwrap().as_string().unwrap();
             let url = Uri::from_str(&url).map_err(|e| format!("Unparsable URL: {}", e))?;
+            if let Some(authority) = url.authority() {
+                *state.origin.borrow_mut() = Some(authority.to_string());
+            }
             let Some(hostname) = url.host() else {
                 return Ok(el("div"));
             };
             let hostname_segs = hostname.split('.').collect::<Vec<_>>();
-            for i in 0 ..= hostname_segs.len() - 2 {
-                raw_paths.push(
-                    SpecificPath(
-                        vec![
-                            "web".to_string(),
-                            hostname_segs[hostname_segs.len() - 2 - i .. hostname_segs.len()].join(".")
-                        ],
-                    ).to_string(),
-                );
-            }
-            console::log_1(&JsValue::from("b5"));
+            let raw_path =
+                SpecificPath(
+                    vec!["web".to_string(), hostname_segs[hostname_segs.len() - 2 .. hostname_segs.len()].join(".")],
+                ).to_string();
             let Some(addr) = addr.upgrade() else {
                 return Ok(el("div"));
             };
-            addr.ref_attr("value", &raw_paths[0]);
-            console::log_1(&JsValue::from("b5b"));
+            addr.ref_attr("value", &raw_path);
             let Some(tree_root) = tree_root.upgrade() else {
                 return Ok(el("div"));
             };
-            update(&tree_root, raw_paths);
-            console::log_1(&JsValue::from("b5c"));
+            update(&state, &tree_root, raw_path);
             return Ok(el("div"));
         }
     }));
-    console::log_1(&JsValue::from("b6"));
 
-    fn update_from_addr(addr: &WeakEl, tree_root: &WeakEl) {
+    fn update_from_addr(state: &Rc<State>, addr: &WeakEl, tree_root: &WeakEl) {
         let Some(addr) = addr.upgrade() else {
             return;
         };
         let Some(tree_root) = tree_root.upgrade() else {
             return;
         };
-        update(&tree_root, vec![addr.raw().dyn_ref::<HtmlInputElement>().unwrap().value()]);
+        let addr = addr.raw().dyn_into::<HtmlInputElement>().unwrap();
+        update(&state, &tree_root, addr.value());
     }
 
     addr.ref_on("keyup", {
         let addr = addr.weak();
         let tree_root = tree_root.weak();
+        let state = state.clone();
         move |_| {
-            update_from_addr(&addr, &tree_root);
+            update_from_addr(&state, &addr, &tree_root);
         }
     });
-    console::log_1(&JsValue::from("b7"));
     addr.ref_on("change", {
         let addr = addr.weak();
         let tree_root = tree_root.weak();
+        let state = state.clone();
         move |_| {
-            update_from_addr(&addr, &tree_root);
+            update_from_addr(&state, &addr, &tree_root);
         }
     });
-    console::log_1(&JsValue::from("b8"));
     set_root(vec![addr, tree_root]);
-    console::log_1(&JsValue::from("b9"));
 }

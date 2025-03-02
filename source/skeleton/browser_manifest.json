@@ -5,6 +5,9 @@
   "homepage_url": "https://github.com/andrewbaxter/passworth",
   "version": "0.1.0",
   "author": "Andrew Baxter",
+  "icons": {
+    "48": "icon.svg"
+  },
   "content_security_policy": {
     "extension_pages": "default-src 'self' 'wasm-unsafe-eval'; script-src 'self' 'wasm-unsafe-eval'"
   },
@@ -27,6 +30,7 @@
     }
   ],
   "action": {
+    "default_icon": "icon.svg",
     "default_popup": "popup.html"
   },
   "commands": {

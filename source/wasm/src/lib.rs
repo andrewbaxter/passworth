@@ -14,10 +14,24 @@ use {
     },
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToContentUserPassword {
+    pub user: String,
+    pub password: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToContentField {
+    pub text: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case", deny_unknown_fields, tag = "type")]
 pub enum ToContent {
-    FillUserPassword(String, String),
-    FillField(String),
+    FillUserPassword(ToContentUserPassword),
+    FillField(ToContentField),
 }
 
 pub fn browser() -> JsValue {

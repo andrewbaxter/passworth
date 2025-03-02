@@ -729,8 +729,19 @@ async fn main2() -> Result<(), loga::Error> {
 
                         // Process request
                         while let Some(req) = conn.recv_req().await.map_err(loga::err)? {
-                            fn resp_unauthorized() -> Result<ipc::msg::ServerResp, loga::Error> {
-                                return Err(loga::err("Unauthorized"));
+                            enum AuthErr {
+                                Err(loga::Error),
+                                Unauthorized,
+                            }
+
+                            impl From<loga::Error> for AuthErr {
+                                fn from(value: loga::Error) -> Self {
+                                    return Self::Err(value);
+                                }
+                            }
+
+                            fn resp_unauthorized() -> Result<ipc::msg::ServerResp, AuthErr> {
+                                return Err(AuthErr::Unauthorized);
                             }
 
                             let resp;
@@ -850,7 +861,7 @@ async fn main2() -> Result<(), loga::Error> {
                                                 }
                                             }
                                             return Ok(root) as Result<_, loga::Error>;
-                                        }).await??;
+                                        }).await.map_err(|e| loga::Error::from(e))??;
                                         activity.notify_one();
                                         resp = rr(db_resp);
                                     },
@@ -870,7 +881,9 @@ async fn main2() -> Result<(), loga::Error> {
                                             return Ok(get(txn, &req.path, None)?);
                                         }).await?;
                                         let serde_json::Value::String(key) = db_key else {
-                                            return Err(loga::err("No value at path or value is not a string"));
+                                            return Err(
+                                                loga::err("No value at path or value is not a string").into(),
+                                            );
                                         };
                                         resp =
                                             rr(
@@ -900,7 +913,9 @@ async fn main2() -> Result<(), loga::Error> {
                                             return Ok(get(txn, &req.path, None)?);
                                         }).await?;
                                         let serde_json::Value::String(key) = db_key else {
-                                            return Err(loga::err("No value at path or value is not a string"));
+                                            return Err(
+                                                loga::err("No value at path or value is not a string").into(),
+                                            );
                                         };
                                         resp =
                                             rr(
@@ -1135,7 +1150,9 @@ async fn main2() -> Result<(), loga::Error> {
                                             return Ok(get(txn, &req.key, None)?);
                                         }).await?;
                                         let serde_json::Value::String(key) = db_key else {
-                                            return Err(loga::err("No value at path or value is not a string"));
+                                            return Err(
+                                                loga::err("No value at path or value is not a string").into(),
+                                            );
                                         };
                                         let mut signed = vec![];
                                         let mut signer =
@@ -1202,7 +1219,9 @@ async fn main2() -> Result<(), loga::Error> {
                                             return Ok(get(txn, &req.key, None)?);
                                         }).await?;
                                         let serde_json::Value::String(key) = db_key else {
-                                            return Err(loga::err("No value at path or value is not a string"));
+                                            return Err(
+                                                loga::err("No value at path or value is not a string").into(),
+                                            );
                                         };
                                         let mut decrypted = vec![];
 
@@ -1306,7 +1325,9 @@ async fn main2() -> Result<(), loga::Error> {
                                             return Ok(get(txn, &req.key, None)?);
                                         }).await?;
                                         let serde_json::Value::String(otp_url) = otp_url else {
-                                            return Err(loga::err("No value at path or value is not a string"));
+                                            return Err(
+                                                loga::err("No value at path or value is not a string").into(),
+                                            );
                                         };
                                         let otp =
                                             totp_rs::TOTP::from_url_unchecked(
@@ -1322,8 +1343,15 @@ async fn main2() -> Result<(), loga::Error> {
                                     resp = r;
                                 },
                                 Err(e) => {
-                                    log.log_err(loga::WARN, e.context("Error processing request"));
-                                    resp = ipc::msg::ServerResp::err("Encountered error processing request");
+                                    match e {
+                                        AuthErr::Err(e) => {
+                                            log.log_err(loga::WARN, e.context("Error processing request"));
+                                            resp = ipc::msg::ServerResp::err("Encountered error processing request");
+                                        },
+                                        AuthErr::Unauthorized => {
+                                            resp = ipc::msg::ServerResp::err("Unauthorized");
+                                        },
+                                    }
                                 },
                             };
                             conn.send_resp(resp).await.map_err(loga::err)?;
