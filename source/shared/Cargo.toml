@@ -2,6 +2,10 @@
 name = "passworth"
 version = "0.1.0"
 edition = "2021"
+description = "Protocol shared datatypes for Passworth"
+readme = "../../readme.md"
+repository = "https://github.com/andrewbaxter/passworth"
+license = "ISC"
 
 [features]
 native = ["dep:aargvark"]
