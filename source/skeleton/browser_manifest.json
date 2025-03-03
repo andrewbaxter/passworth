@@ -3,7 +3,7 @@
   "name": "Passworth",
   "description": "Fill username, password, OTP fields directly from Passworth",
   "homepage_url": "https://github.com/andrewbaxter/passworth",
-  "version": "0.1.0",
+  "version": "_PLACEHOLDER_VERSION",
   "author": "Andrew Baxter",
   "icons": {
     "48": "icon.svg"

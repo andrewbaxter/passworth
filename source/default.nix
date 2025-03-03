@@ -107,7 +107,7 @@ let
     builder = "${pkgs.bash}/bin/bash";
     args = [
       (pkgs.writeText "browserBuilder" ''
-        set -xeu
+        set -xeu -o pipefail
 
         cp () {
           ${pkgs.coreutils}/bin/cp -r --no-preserve=all "$@"
@@ -125,6 +125,8 @@ let
         # Assemble browser bits
         ${pkgs.coreutils}/bin/mkdir -p browser_wasm
         ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/popup.wasm --out-name popup2 --out-dir browser_wasm
+        version=$(${pkgs.gnugrep}/bin/grep "^version =" ${./native/Cargo.toml} | ${pkgs.gnused}/bin/sed -e "s/.*\"\(.*\)\".*/\1/")
+        set skeleton/browser_manifest.json _PLACEHOLDER_VERSION "$version"
 
         cp skeleton/ext_static stage/browser_chrome
         cp browser_wasm/* stage/browser_chrome/
