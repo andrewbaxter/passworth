@@ -1,24 +1,15 @@
 use {
     aargvark::{
+        traits::AargvarkCompleter,
         traits_impls::{
             AargvarkFile,
+            AargvarkFromStr,
             AargvarkJson,
         },
         vark,
         Aargvark,
     },
     async_tempfile::TempFile,
-    passworth::{
-        datapath::SpecificPath,
-        ipc::{
-            C2SGenerateVariant,
-            C2SGenerateVariantAlphanumeric,
-            C2SGenerateVariantAlphanumericSymbols,
-            C2SGenerateVariantBytes,
-            C2SGenerateVariantSafeAlphanumeric,
-        },
-        utils::to_b32,
-    },
     loga::{
         ea,
         fatal,
@@ -27,7 +18,18 @@ use {
         Log,
         ResultContext,
     },
-    passworth::ipc,
+    passworth::{
+        datapath::SpecificPath,
+        ipc::{
+            self,
+            C2SGenerateVariant,
+            C2SGenerateVariantAlphanumeric,
+            C2SGenerateVariantAlphanumericSymbols,
+            C2SGenerateVariantBytes,
+            C2SGenerateVariantSafeAlphanumeric,
+        },
+        utils::to_b32,
+    },
     passworth_native::{
         crypto::{
             get_card_pubkey,
@@ -42,10 +44,14 @@ use {
             Write,
         },
         path::Path,
+        str::FromStr,
     },
-    tokio::io::{
-        AsyncReadExt,
-        AsyncWriteExt,
+    tokio::{
+        io::{
+            AsyncReadExt,
+            AsyncWriteExt,
+        },
+        task::spawn_blocking,
     },
 };
 
@@ -53,6 +59,70 @@ async fn req<T: ipc::msg::ReqTrait>(body: T) -> Result<T::Resp, loga::Error> {
     return Ok(
         ipc::msg::Client::new(ipc_path()).await.map_err(loga::err)?.send_req(body).await.map_err(loga::err)?,
     );
+}
+
+fn remove_prefix(value: serde_json::Value, path: &SpecificPath) -> serde_json::Value {
+    let mut value = value;
+    for seg in &path.0 {
+        match value {
+            serde_json::Value::Object(mut o) => value = o.remove(seg).unwrap(),
+            serde_json::Value::Null => {
+                value = serde_json::Value::Null;
+                break;
+            },
+            r => unreachable!("got {:?}", r),
+        }
+    }
+    return value;
+}
+
+struct AargvarkSpecificPath(SpecificPath);
+
+impl AargvarkFromStr for AargvarkSpecificPath {
+    fn from_str(s: &str) -> Result<Self, String> {
+        return Ok(AargvarkSpecificPath(SpecificPath::from_str(s).map_err(|e| e.to_string())?));
+    }
+
+    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
+        return aargvark::help::HelpPattern(
+            vec![aargvark::help::HelpPatternElement::Type("PATH/TO/DATA".to_string())],
+        );
+    }
+
+    fn build_completer(arg: &str) -> AargvarkCompleter {
+        let arg = arg.to_string();
+        return Box::new(move || {
+            let Ok(mut path) = SpecificPath::from_str(&arg) else {
+                return vec![];
+            };
+            let parent;
+            let prefix;
+            if path.0.is_empty() {
+                prefix = "".to_string();
+                parent = path;
+            } else {
+                prefix = path.0.pop().unwrap();
+                parent = path;
+            }
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let Ok(res) = rt.block_on(req(ipc::ReqMetaKeys {
+                paths: vec![parent.clone()],
+                at: None,
+            })) else {
+                return vec![];
+            };
+            let serde_json::Value::Object(res) = remove_prefix(res, &parent) else {
+                return vec![];
+            };
+            return res.keys().filter_map(|x| if x.starts_with(&prefix) {
+                let mut path = parent.clone();
+                path.0.push(x.clone());
+                Some(vec![path.to_string()])
+            } else {
+                None
+            }).collect();
+        });
+    }
 }
 
 #[derive(Aargvark)]
@@ -95,7 +165,7 @@ enum GenerateVariant {
 #[derive(Aargvark)]
 struct ReadCommand {
     /// A path to get data for, in `/path/to/data` format.
-    path: SpecificPath,
+    path: AargvarkSpecificPath,
     /// Optionally retrieve the latest data at or before a previous revision id.
     revision: Option<i64>,
     /// Output json encoded data rather than de-quoting strings. This also allows
@@ -106,7 +176,7 @@ struct ReadCommand {
 #[derive(Aargvark)]
 struct MetaKeysCommand {
     /// A path to get keys for, in `/path/to/data` format.
-    path: SpecificPath,
+    path: AargvarkSpecificPath,
     /// Optionally retrieve the latest data at or before a previous revision id.
     revision: Option<i64>,
 }
@@ -114,7 +184,7 @@ struct MetaKeysCommand {
 #[derive(Aargvark)]
 struct MetaPgpPubkeyCommand {
     /// Path to the private key.
-    path: SpecificPath,
+    path: AargvarkSpecificPath,
     /// Optionally retrieve the latest data at or before a previous revision id.
     revision: Option<i64>,
 }
@@ -122,7 +192,7 @@ struct MetaPgpPubkeyCommand {
 #[derive(Aargvark)]
 struct MetaSshPubkeyCommand {
     /// Path to the private key.
-    path: SpecificPath,
+    path: AargvarkSpecificPath,
     /// Optionally retrieve the latest data at or before a previous revision id.
     revision: Option<i64>,
 }
@@ -130,7 +200,7 @@ struct MetaSshPubkeyCommand {
 #[derive(Aargvark)]
 struct WriteCommand {
     /// Path to create/overwrite
-    path: SpecificPath,
+    path: AargvarkSpecificPath,
     /// Input is already JSON so add directly rather than encode as JSON string
     json: Option<()>,
     /// Input is binary, store as a B64 JSON string
@@ -140,13 +210,13 @@ struct WriteCommand {
 #[derive(Aargvark)]
 struct WriteEditCommand {
     /// Path to create/overwrite
-    path: SpecificPath,
+    path: AargvarkSpecificPath,
 }
 
 #[derive(Aargvark)]
 struct WriteMoveCommand {
-    from: SpecificPath,
-    to: SpecificPath,
+    from: AargvarkSpecificPath,
+    to: AargvarkSpecificPath,
     /// If force is off and the destination path already has data, this will error.
     /// Setting force will override the data.
     overwrite: Option<()>,
@@ -155,7 +225,7 @@ struct WriteMoveCommand {
 #[derive(Aargvark)]
 struct WriteGenerateCommand {
     /// Where to store the generated data.
-    path: SpecificPath,
+    path: AargvarkSpecificPath,
     /// What sort of data to generate.
     variant: GenerateVariant,
     /// Write the generated data even if data already exists at the path (overwrites
@@ -166,7 +236,7 @@ struct WriteGenerateCommand {
 #[derive(Aargvark)]
 struct DerivePgpSignCommand {
     /// Path of key (in ascii-armor format) to sign with
-    key: SpecificPath,
+    key: AargvarkSpecificPath,
     /// Data to sign.
     data: AargvarkFile,
 }
@@ -174,7 +244,7 @@ struct DerivePgpSignCommand {
 #[derive(Aargvark)]
 struct DerivePgpDecryptCommand {
     /// Path of key (in ascii-armor format) to decrypt with
-    key: SpecificPath,
+    key: AargvarkSpecificPath,
     /// Data to decrypt.
     data: AargvarkFile,
 }
@@ -182,13 +252,13 @@ struct DerivePgpDecryptCommand {
 #[derive(Aargvark)]
 struct DeriveOtpCommand {
     /// Path of key (in `otpauth://` format) to decrypt with
-    key: SpecificPath,
+    key: AargvarkSpecificPath,
 }
 
 #[derive(Aargvark)]
 struct ListRevisionsCommand {
     /// Retrieve the revision ids of the data at each path.
-    paths: Vec<SpecificPath>,
+    paths: Vec<AargvarkSpecificPath>,
     /// Retrieve the revision data at a specific revision.
     revision: Option<i64>,
 }
@@ -197,7 +267,7 @@ struct ListRevisionsCommand {
 struct RevertCommand {
     /// Revert the data at the specified paths to their value at or before the
     /// specified revision.
-    paths: Vec<SpecificPath>,
+    paths: Vec<AargvarkSpecificPath>,
     /// The revision id.
     #[vark(flag = "--revision")]
     revision: i64,
@@ -259,7 +329,7 @@ enum Command {
 
 async fn main2() -> Result<(), loga::Error> {
     let log = Log::new_root(loga::INFO);
-    match vark::<Command>() {
+    match spawn_blocking(|| vark::<Command>()).await.unwrap() {
         Command::Json(args) => {
             let resp =
                 ipc::msg::Client::new(ipc_path())
@@ -285,56 +355,38 @@ async fn main2() -> Result<(), loga::Error> {
         },
         Command::MetaKeys(args) => {
             let mut res = req(ipc::ReqMetaKeys {
-                paths: vec![args.path.clone()],
+                paths: vec![args.path.0.clone()],
                 at: args.revision,
             }).await?;
 
             // Remove prefix on data
-            for seg in &args.path.0 {
-                match res {
-                    serde_json::Value::Object(mut o) => res = o.remove(seg).unwrap(),
-                    serde_json::Value::Null => {
-                        res = serde_json::Value::Null;
-                        break;
-                    },
-                    r => unreachable!("got {:?}", r),
-                }
-            }
+            res = remove_prefix(res, &args.path.0);
 
             // Output
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         },
         Command::MetaPgpPubkey(args) => {
             let res = req(ipc::ReqMetaPgpPubkey {
-                path: args.path,
+                path: args.path.0,
                 at: args.revision,
             }).await?;
             println!("{}", res);
         },
         Command::MetaSshPubkey(args) => {
             let res = req(ipc::ReqMetaSshPubkey {
-                path: args.path,
+                path: args.path.0,
                 at: args.revision,
             }).await?;
             println!("{}", res);
         },
         Command::Read(args) => {
             let mut res = req(ipc::ReqRead {
-                paths: vec![args.path.clone()],
+                paths: vec![args.path.0.clone()],
                 at: args.revision,
             }).await?;
 
             // Remove prefix on data
-            for seg in &args.path.0 {
-                match res {
-                    serde_json::Value::Object(mut o) => res = o.remove(seg).unwrap(),
-                    serde_json::Value::Null => {
-                        res = serde_json::Value::Null;
-                        break;
-                    },
-                    r => unreachable!("got {:?}", r),
-                }
-            }
+            res = remove_prefix(res, &args.path.0);
 
             // Output
             match (args.json.is_some(), &res) {
@@ -351,7 +403,7 @@ async fn main2() -> Result<(), loga::Error> {
         },
         Command::ReadRevisions(args) => {
             let res = req(ipc::ReqMetaRevisions {
-                paths: args.paths,
+                paths: args.paths.into_iter().map(|x| x.0).collect(),
                 at: args.revision,
             }).await?;
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
@@ -366,7 +418,7 @@ async fn main2() -> Result<(), loga::Error> {
             } else {
                 serde_json::Value::String(String::from_utf8(data).context("Error parsing value as UTF-8")?)
             };
-            req(ipc::ReqWrite(vec![(args.path, data)])).await?;
+            req(ipc::ReqWrite(vec![(args.path.0, data)])).await?;
         },
         Command::WriteEdit(args) => {
             const ENV_EDITOR: &str = "SECURE_EDITOR";
@@ -376,21 +428,12 @@ async fn main2() -> Result<(), loga::Error> {
 
             // Get existing data
             let mut res = req(ipc::ReqRead {
-                paths: vec![args.path.clone()],
+                paths: vec![args.path.0.clone()],
                 at: None,
             }).await?;
 
             // Remove prefix on data
-            for seg in &args.path.0 {
-                match res {
-                    serde_json::Value::Object(mut o) => res = o.remove(seg).unwrap(),
-                    serde_json::Value::Null => {
-                        res = serde_json::Value::Null;
-                        break;
-                    },
-                    r => unreachable!("got {:?}", r),
-                }
-            }
+            res = remove_prefix(res, &args.path.0);
 
             // Store in tempfile
             let run_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -449,24 +492,24 @@ async fn main2() -> Result<(), loga::Error> {
                     }
                 },
             };
-            req(ipc::ReqWrite(vec![(args.path, data)])).await?;
+            req(ipc::ReqWrite(vec![(args.path.0, data)])).await?;
         },
         Command::WriteMove(args) => {
             req(ipc::ReqWriteMove {
-                from: args.from,
-                to: args.to,
+                from: args.from.0,
+                to: args.to.0,
                 overwrite: args.overwrite.is_some(),
             }).await?;
         },
         Command::WriteRevert(args) => {
             req(ipc::ReqWriteRevert {
-                paths: args.paths,
+                paths: args.paths.into_iter().map(|x| x.0).collect(),
                 at: args.revision,
             }).await?;
         },
         Command::WriteGenerate(args) => {
             req(ipc::ReqWriteGenerate {
-                path: args.path,
+                path: args.path.0,
                 variant: match args.variant {
                     GenerateVariant::Bytes(args) => C2SGenerateVariant::Bytes(
                         C2SGenerateVariantBytes { length: args.length },
@@ -488,7 +531,7 @@ async fn main2() -> Result<(), loga::Error> {
         },
         Command::DerivePgpSign(args) => {
             let res = req(ipc::ReqDerivePgpSign {
-                key: args.key,
+                key: args.key.0,
                 data: args.data.value,
             }).await?;
             std::io::stdout().write_all(res.as_bytes()).unwrap();
@@ -496,14 +539,14 @@ async fn main2() -> Result<(), loga::Error> {
         },
         Command::DerivePgpDecrypt(args) => {
             let res = req(ipc::ReqDerivePgpDecrypt {
-                key: args.key,
+                key: args.key.0,
                 data: args.data.value,
             }).await?;
             std::io::stdout().write_all(&res).unwrap();
             std::io::stdout().flush().unwrap();
         },
         Command::DeriveOtp(args) => {
-            let res = req(ipc::ReqDeriveOtp { key: args.key }).await?;
+            let res = req(ipc::ReqDeriveOtp { key: args.key.0 }).await?;
             std::io::stdout().write_all(res.as_bytes()).unwrap();
             std::io::stdout().flush().unwrap();
         },

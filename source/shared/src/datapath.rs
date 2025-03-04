@@ -9,10 +9,6 @@ use {
     },
     std::str::FromStr,
 };
-#[cfg(feature = "native")]
-use {
-    aargvark::traits_impls::AargvarkFromStr,
-};
 
 struct Reader {
     i: usize,
@@ -100,19 +96,6 @@ impl ToString for SpecificPath {
             out.push_str(&seg.replace("\\", "\\\\").replace("/", "\\/"));
         }
         return out;
-    }
-}
-
-#[cfg(feature = "native")]
-impl AargvarkFromStr for SpecificPath {
-    fn from_str(s: &str) -> Result<Self, String> {
-        return Ok(<SpecificPath as FromStr>::from_str(s).map_err(|e| e.to_string())?);
-    }
-
-    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
-        return aargvark::help::HelpPattern(
-            vec![aargvark::help::HelpPatternElement::Type("PATH/TO/DATA".to_string())],
-        );
     }
 }
 

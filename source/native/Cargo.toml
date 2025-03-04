@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 pcsc = "2"
-aargvark = { version = "0.7", features = ["serde_json"] }
+aargvark = { version = "0.8", features = ["serde_json"] }
 loga = "0.5"
 card-backend = "0.2"
 card-backend-pcsc = "0.5"
@@ -46,7 +46,7 @@ async-stream = "0.3"
 ssh-key = { version = "0.6", features = ["crypto"] }
 totp-rs = { version = "5", features = ["otpauth"] }
 async-tempfile = "0.7"
-passworth = { path = "../shared", features = ["native"] }
+passworth = { path = "../shared" }
 zbase32 = "0.1"
 wasm-bindgen-cli-support = "=0.2.100"
 wasm2map = "0.1"

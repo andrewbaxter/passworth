@@ -117,24 +117,14 @@ At the moment this has only been built on Firefox.  I'm unable to use Chrome and
 
 The browser plugin is a native plugin - this means there's two components, the extension (a normal extension) and the "native messaging host", a native binary that must be registered with the browser so the extension can communicate with it.
 
-Additionally, you must add the appropriate rule to your config so that the plugin is allowed to read/derive web. Suggested rules are:
+Additionally, you must add the appropriate rules to your config so that the plugin is allowed to read/derive web, like:
 
 ```
 [
   {
     "paths": [ "/web" ],
     "match_binary": { path": "/path/to/native-messaging-host/binary" },
-    "permit": "meta"
-  },
-  {
-    "paths": [ "/web/*/*/user", "/web/*/*/password" ],
-    "match_binary": { path": "/path/to/native-messaging-host/binary" },
     "permit": "read"
-  },
-  {
-    "paths": [ "/web/*/*/otp" ],
-    "match_binary": { path": "/path/to/native-messaging-host/binary" },
-    "permit": "derive",
   }
 ]
 ```

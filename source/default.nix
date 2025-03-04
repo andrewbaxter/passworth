@@ -64,6 +64,7 @@ let
         pkgs.rustPlatform.bindgenHook
         pkgs.llvmPackages.libclang
         pkgs.makeWrapper
+        pkgs.installShellFiles
       ];
       buildInputs = [
         pkgs.at-spi2-atk
@@ -89,6 +90,8 @@ let
           wrapProgram $out/bin/passworth-server --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
           wrapProgram $out/bin/passworth --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
           (cd $out/bin; ln -s passworth pw)
+          installShellCompletion --cmd pw --bash ${./complete_pw.bash} --zsh ${./complete_pw.zsh}
+          installShellCompletion --cmd passworth --bash ${./complete_pw.bash} --zsh ${./complete_pw.zsh}
         '';
     };
   };
@@ -120,38 +123,38 @@ let
         }
 
         ${pkgs.coreutils}/bin/mkdir -p stage
-        cp ${./skeleton} skeleton
+        cp ${./browser} browser_src
         
         # Assemble browser bits
         ${pkgs.coreutils}/bin/mkdir -p browser_wasm
         ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/popup.wasm --out-name popup2 --out-dir browser_wasm
         version=$(${pkgs.gnugrep}/bin/grep "^version =" ${./shared/Cargo.toml} | ${pkgs.gnused}/bin/sed -e "s/.*\"\(.*\)\".*/\1/")
-        set skeleton/browser_manifest.json _PLACEHOLDER_VERSION "$version"
+        set browser_src/browser_manifest.json _PLACEHOLDER_VERSION "$version"
 
-        cp skeleton/ext_static stage/browser_chrome
+        cp browser_src/ext_static stage/browser_chrome
         cp browser_wasm/* stage/browser_chrome/
         chrome_browser_manifest_path=stage/browser_chrome/manifest.json
-        merge skeleton/browser_manifest.json ./skeleton/browser_manifest_chrome.json > $chrome_browser_manifest_path
+        merge browser_src/browser_manifest.json ./browser_src/browser_manifest_chrome.json > $chrome_browser_manifest_path
         set $chrome_browser_manifest_path _PLACEHOLDER_BROWSERIDKEY '${extensionIdKeyChrome}'
         
-        cp skeleton/ext_static stage/browser_firefox
+        cp browser_src/ext_static stage/browser_firefox
         cp browser_wasm/* stage/browser_firefox/
         firefox_browser_manifest_path=stage/browser_firefox/manifest.json
-        merge skeleton/browser_manifest.json ./skeleton/browser_manifest_firefox.json > $firefox_browser_manifest_path
+        merge browser_src/browser_manifest.json ./browser_src/browser_manifest_firefox.json > $firefox_browser_manifest_path
         set $firefox_browser_manifest_path _PLACEHOLDER_BROWSERID '${extensionIdFirefox}'
 
         # Assemble native bits
         ${pkgs.coreutils}/bin/mkdir -p stage/native
         cp ${native}/bin/passworth-browser stage/native/binary
-        set skeleton/native_manifest.json _PLACEHOLDER_BINPATH "$out/native/binary"
-        set skeleton/native_manifest.json _PLACEHOLDER_NATIVEID '${nativeId}'
+        set browser_src/native_manifest.json _PLACEHOLDER_BINPATH "$out/native/binary"
+        set browser_src/native_manifest.json _PLACEHOLDER_NATIVEID '${nativeId}'
 
-        merge skeleton/native_manifest.json skeleton/native_manifest_chrome.json > stage/native/manifest_chrome.json
+        merge browser_src/native_manifest.json browser_src/native_manifest_chrome.json > stage/native/manifest_chrome.json
         set stage/native/manifest_chrome.json _PLACEHOLDER_BROWSERID 'chrome-extension://${extensionIdChrome}/'
 
         firefox_native_manifest_dir=stage/lib/mozilla/native-messaging-hosts/       
         ${pkgs.coreutils}/bin/mkdir -p $firefox_native_manifest_dir
-        merge skeleton/native_manifest.json skeleton/native_manifest_firefox.json > $firefox_native_manifest_dir/${nativeId}.json
+        merge browser_src/native_manifest.json browser_src/native_manifest_firefox.json > $firefox_native_manifest_dir/${nativeId}.json
         set $firefox_native_manifest_dir/${nativeId}.json _PLACEHOLDER_BROWSERID '${extensionIdFirefox}'
 
         cp stage $out
