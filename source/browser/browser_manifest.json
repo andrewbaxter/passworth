@@ -6,10 +6,10 @@
   "version": "_PLACEHOLDER_VERSION",
   "author": "Andrew Baxter",
   "icons": {
-    "48": "icon.svg"
+    "48": "icon2.svg"
   },
   "content_security_policy": {
-    "extension_pages": "default-src 'self' 'wasm-unsafe-eval'; script-src 'self' 'wasm-unsafe-eval'"
+    "extension_pages": "default-src 'self' 'wasm-unsafe-eval'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' 'wasm-unsafe-eval' https://publicsuffix.org/"
   },
   "permissions": [
     "activeTab",
@@ -30,7 +30,7 @@
     }
   ],
   "action": {
-    "default_icon": "icon.svg",
+    "default_icon": "icon2.svg",
     "default_popup": "popup.html"
   },
   "commands": {

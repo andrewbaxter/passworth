@@ -10,7 +10,9 @@ pub fn from_b32(data: &String) -> Result<Vec<u8>, String> {
     );
 }
 
-pub fn dig<P: AsRef<str>>(data: &serde_json::Value, path: impl Iterator<Item = P>) -> Option<&serde_json::Value> {
+pub fn dig<
+    P: AsRef<str>,
+>(data: &serde_json::Value, path: impl IntoIterator<Item = P>) -> Option<&serde_json::Value> {
     let mut at = data;
     for seg in path {
         match at {

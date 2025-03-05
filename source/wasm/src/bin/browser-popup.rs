@@ -1,4 +1,8 @@
 use {
+    flowcontrol::{
+        exenum,
+        shed,
+    },
     gloo::{
         events::{
             EventListener,
@@ -39,10 +43,14 @@ use {
         set_root,
         El,
     },
-    serde::Serialize,
+    serde::{
+        Deserialize,
+        Serialize,
+    },
     serde_json::json,
     std::{
         cell::RefCell,
+        collections::HashMap,
         future::Future,
         rc::Rc,
         str::FromStr,
@@ -111,9 +119,23 @@ fn el_group() -> El {
 
 struct State {
     origin: RefCell<Option<String>>,
-    search_path: RefCell<Option<SpecificPath>>,
+    search_path: RefCell<Option<String>>,
     focus: RefCell<Option<El>>,
 }
+
+fn storage_site_key(origin: &str) -> String {
+    return format!("site_{}", origin);
+}
+
+const STORAGE_PSL_KEY: &str = "psl";
+
+#[derive(Serialize, Deserialize)]
+enum PslEntry {
+    Branch(HashMap<String, PslEntry>),
+    Leaf,
+}
+
+type Psl = HashMap<String, PslEntry>;
 
 fn save_search_path(state: &Rc<State>) {
     let Some(origin) = &*state.origin.borrow() else {
@@ -122,11 +144,9 @@ fn save_search_path(state: &Rc<State>) {
     let Some(search_path) = &*state.search_path.borrow() else {
         return;
     };
-    if let Err(e) = LocalStorage::set(&origin, &search_path.to_string()) {
+    if let Err(e) = LocalStorage::set(&storage_site_key(origin), search_path) {
         console::log_1(
-            &JsValue::from(
-                format!("Error saving search path [{}] for origin [{}]: {}", search_path.to_string(), origin, e),
-            ),
+            &JsValue::from(format!("Error saving search path [{}] for origin [{}]: {}", search_path, origin, e)),
         );
     }
 }
@@ -242,7 +262,16 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
     let Ok(mut path) = SpecificPath::from_str(&raw_path) else {
         return;
     };
-    *state.search_path.borrow_mut() = Some(path.clone());
+    let parent;
+    let prefix;
+    if path.0.is_empty() {
+        prefix = "".to_string();
+        parent = path.clone();
+    } else {
+        prefix = path.0.pop().unwrap();
+        parent = path.clone();
+    }
+    *state.search_path.borrow_mut() = Some(raw_path);
     *state.focus.borrow_mut() = None;
     tree_root_el.ref_clear();
     tree_root_el.ref_push(el_async({
@@ -250,8 +279,8 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
         let messages_el = messages_el.weak();
         async move {
             // Async
-            let mut raw_tree = send_to_native(ipc::ReqMetaKeys {
-                paths: vec![path.clone()],
+            let raw_tree = send_to_native(ipc::ReqMetaKeys {
+                paths: vec![parent.clone()],
                 at: None,
             }).await?;
 
@@ -259,16 +288,6 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
             let Some(messages_el) = messages_el.upgrade() else {
                 return Ok(el("div"));
             };
-            for seg in &path.0 {
-                let serde_json::Value::Object(mut t) = raw_tree else {
-                    return Err(format!("Response missing path prefix"));
-                };
-                let Some(t) = t.remove(seg) else {
-                    return Err(format!("Response missing path prefix"));
-                };
-                raw_tree = t;
-            }
-            let new_tree = el_vbox().classes(&["s_choices"]);
 
             fn build_row(subpath: &Vec<String>, actions: Vec<El>) -> El {
                 let mut head = subpath.clone();
@@ -303,12 +322,13 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
                         async move {
                             save_search_path(&state);
                             let resp = send_to_native(ipc::ReqRead {
-                                paths: vec![path],
+                                paths: vec![path.clone()],
                                 at: None,
                             }).await?;
-                            send_to_content(
-                                ToContent::FillField(ToContentField { text: force_string(&resp) }),
-                            ).await;
+                            send_to_content(ToContent::FillField(ToContentField { text: force_string(
+                                //. .
+                                dig(&resp, &path.0).ok_or_else(|| format!("Response missing expected data path ancestry"))?,
+                            ) })).await;
                             window().close().unwrap();
                             return Ok(());
                         }
@@ -367,13 +387,13 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
                                 }).await?;
                                 let user;
                                 if user_field {
-                                    user = dig(&resp, user_path.0.iter()).unwrap().clone();
+                                    user = dig(&resp, &user_path.0).unwrap().clone();
                                 } else {
                                     user = serde_json::Value::String(path.0.last().unwrap().clone());
                                 }
                                 send_to_content(ToContent::FillUserPassword(ToContentUserPassword {
                                     user: force_string(&user),
-                                    password: force_string(dig(&resp, password_path.0.iter()).unwrap()),
+                                    password: force_string(dig(&resp, &password_path.0).unwrap()),
                                 })).await;
                                 window().close().unwrap();
                                 return Ok(());
@@ -383,42 +403,57 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
                 );
             }
 
-            match raw_tree {
-                serde_json::Value::Object(map) => {
+            let mut choices = vec![];
+            if let serde_json::Value::Object(root) =
+                dig(&raw_tree, &parent.0).ok_or_else(|| format!("Response missing path prefix"))? {
+                let mut path = parent;
+                let mut subpath = vec![];
+                for (k, v) in root {
+                    if !k.starts_with(&prefix) {
+                        continue;
+                    }
+                    path.0.push(k.clone());
+                    subpath.push(k.clone());
+
                     fn recurse(
                         state: &Rc<State>,
                         messages_el: &El,
-                        out: &El,
-                        at: serde_json::Map<String, serde_json::Value>,
+                        out: &mut Vec<El>,
+                        at: &serde_json::Value,
                         path: &mut SpecificPath,
                         subpath: &mut Vec<String>,
                     ) {
-                        if at.contains_key("password") {
-                            out.ref_push(build_group(state, messages_el, path, subpath, at.contains_key("user")));
-                        }
-                        for (k, v) in at {
-                            path.0.push(k.clone());
-                            subpath.push(k);
-                            if let serde_json::Value::Object(at2) = v {
-                                recurse(state, messages_el, out, at2, path, subpath);
-                            } else {
-                                out.ref_push(build_leaf(state, messages_el, path, subpath));
-                            }
-                            path.0.pop();
-                            subpath.pop();
+                        match at {
+                            serde_json::Value::Object(at) => {
+                                if at.contains_key("password") {
+                                    out.push(
+                                        build_group(state, messages_el, path, subpath, at.contains_key("user")),
+                                    );
+                                }
+                                for (k, v) in at {
+                                    path.0.push(k.clone());
+                                    subpath.push(k.clone());
+                                    recurse(state, messages_el, out, v, path, subpath);
+                                    path.0.pop();
+                                    subpath.pop();
+                                }
+                            },
+                            _ => {
+                                out.push(build_leaf(state, messages_el, path, subpath));
+                            },
                         }
                     }
 
-                    recurse(&state, &messages_el, &new_tree, map, &mut path, &mut vec![]);
-                },
-                serde_json::Value::Null => {
-                    return Ok(el_block_text("No results"));
-                },
-                _ => {
-                    return Err(format!("Response included non-null leaf values"));
-                },
+                    recurse(&state, &messages_el, &mut choices, v, &mut path, &mut subpath);
+                    path.0.pop();
+                    subpath.pop();
+                }
             }
-            return Ok(new_tree);
+            if choices.is_empty() {
+                return Ok(el_block_text("No results"));
+            } else {
+                return Ok(el_vbox().classes(&["s_choices"]).extend(choices));
+            }
         }
     }));
 }
@@ -459,23 +494,81 @@ fn main() {
             let active_tab = get_active_tab().await.1;
             let url = js_sys::Reflect::get(&active_tab, &JsValue::from("url")).unwrap().as_string().unwrap();
             let url = Uri::from_str(&url).map_err(|e| format!("Unparsable URL: {}", e))?;
-            if let Some(authority) = url.authority() {
-                *state.origin.borrow_mut() = Some(authority.to_string());
+            let search_string;
+            shed!{
+                // Try saved search path
+                if let Some(authority) = url.authority() {
+                    let origin = authority.to_string();
+                    *state.origin.borrow_mut() = Some(origin.clone());
+                    if let Ok(search_string0) = LocalStorage::get(storage_site_key(&origin)) {
+                        search_string = search_string0;
+                        break;
+                    }
+                }
+
+                // Get a reasonable search path from the current address host
+                let Some(host) = url.host() else {
+                    return Ok(el("div"));
+                };
+                let psl;
+                if let Ok(psl0) = LocalStorage::get::<Psl>(STORAGE_PSL_KEY) {
+                    psl = psl0;
+                } else {
+                    let mut psl0 = Psl::new();
+                    for line in reqwest::get("https://publicsuffix.org/list/public_suffix_list.dat")
+                        .await
+                        .map_err(|e| format!("Error fetching public suffix list for domain splitting: {}", e))?
+                        .text()
+                        .await
+                        .map_err(|e| format!("Error reading public suffix list data for domain splitting: {}", e))?
+                        .lines() {
+                        let line = line.trim();
+                        if line.starts_with("//") {
+                            continue;
+                        }
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let mut at = &mut psl0;
+                        let mut rev_segs = line.split(".").collect::<Vec<_>>();
+                        rev_segs.reverse();
+                        let tail = rev_segs.pop().unwrap();
+                        for seg in rev_segs {
+                            if exenum!(at.get_mut(seg), Some(PslEntry::Branch(_)) =>()).is_none() {
+                                at.insert(seg.to_string(), PslEntry::Branch(HashMap::new()));
+                            }
+                            at = exenum!(at.get_mut(seg), Some(PslEntry::Branch(p)) => p).unwrap();
+                        }
+                        at.entry(tail.to_string()).or_insert(PslEntry::Leaf);
+                    }
+                    LocalStorage::set(
+                        STORAGE_PSL_KEY,
+                        &psl0,
+                    ).map_err(|e| format!("Couldn't put public storage list in local storage: {}", e))?;
+                    psl = psl0;
+                }
+                let mut keep = vec![];
+                let mut at_psl = Some(psl);
+                for seg in host.split('.').rev() {
+                    if let Some(next_psl) = at_psl.and_then(|mut p| p.remove(seg)) {
+                        // Keep all psl segments
+                        keep.push(seg);
+                        at_psl = exenum!(next_psl, PslEntry:: Branch(p) => p);
+                    } else {
+                        // Keep 1 seg after psl
+                        keep.push(seg);
+                        break;
+                    }
+                }
+                keep.reverse();
+                search_string = SpecificPath(vec!["web".to_string(), keep.join(".")]).to_string();
             }
-            let Some(hostname) = url.host() else {
-                return Ok(el("div"));
-            };
-            let hostname_segs = hostname.split('.').collect::<Vec<_>>();
-            let raw_path =
-                SpecificPath(
-                    vec!["web".to_string(), hostname_segs[hostname_segs.len() - 2 .. hostname_segs.len()].join(".")],
-                ).to_string();
 
             // Set addr input
             let Some(addr) = addr_el.upgrade() else {
                 return Ok(el("div"));
             };
-            addr.ref_attr("value", &raw_path);
+            addr.ref_attr("value", &search_string);
 
             // Start querying + building tree
             let Some(tree_root_el) = tree_root_el.upgrade() else {
@@ -484,7 +577,7 @@ fn main() {
             let Some(messages_el) = messages_el.upgrade() else {
                 return Ok(el("div"));
             };
-            update(&state, &tree_root_el, &messages_el, raw_path);
+            update(&state, &tree_root_el, &messages_el, search_string);
 
             // Temporary placeholder
             return Ok(el("div"));
@@ -496,9 +589,9 @@ fn main() {
         let tree_root_el = tree_root_el.weak();
         let state = state.clone();
 
-        // underscore makes various lints not apply (?) - they were wrong anyway, and
-        // `allow(...)` wasn't entirely working, plus application bugs (expr vs
-        // statement...)
+        // (hack: underscore makes various lints not apply (?) - they were wrong anyway,
+        // and `allow(...)` wasn't entirely working, plus upstream bugs (expr vs
+        // statement...))
         let mut _input_debounce = None;
         move |_| {
             _input_debounce = Some(Timeout::new(300, {

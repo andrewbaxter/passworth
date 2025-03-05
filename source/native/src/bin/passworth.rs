@@ -114,13 +114,28 @@ impl AargvarkFromStr for AargvarkSpecificPath {
             let serde_json::Value::Object(res) = remove_prefix(res, &parent) else {
                 return vec![];
             };
-            return res.keys().filter_map(|x| if x.starts_with(&prefix) {
+            let mut out = vec![];
+            for (k, v) in res {
+                if !k.starts_with(&prefix) {
+                    continue;
+                }
                 let mut path = parent.clone();
-                path.0.push(x.clone());
-                Some(vec![path.to_string()])
-            } else {
-                None
-            }).collect();
+                path.0.push(k.clone());
+
+                // Add /a/b/c element
+                out.push(vec![path.to_string()]);
+
+                // Add `/a/b/c/` element 1. to prevent autocomplete from moving to next element,
+                // 2. to indicate that the entry has children
+                match v {
+                    serde_json::Value::Object(_) => {
+                        path.0.push("".to_string());
+                        out.push(vec![path.to_string()]);
+                    },
+                    _ => { },
+                }
+            }
+            return out;
         });
     }
 }

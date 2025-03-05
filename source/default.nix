@@ -1,4 +1,4 @@
-{ pkgs, lib }:
+{ pkgs, lib, debug ? true }:
 let
   hoj = import ((fetchTarball "https://github.com/andrewbaxter/hammer-of-json/archive/4622456e0eeffd62380dbd88d648c28c8a3359d9.zip") + "/source/package.nix") { pkgs = pkgs; lib = lib; };
   fenix = import (fetchTarball "https://github.com/nix-community/fenix/archive/1a79901b0e37ca189944e24d9601c8426675de50.zip") { };
@@ -57,6 +57,7 @@ let
   native = buildRust {
     root = ./native;
     extra = {
+      release = !debug;
       nativeBuildInputs = [
         pkgs.pkg-config
         pkgs.cargo
@@ -97,6 +98,7 @@ let
   };
   wasmUnbound = buildRust {
     extra.CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+    extra.release = !debug;
     root = ./wasm;
   };
   nativeId = "me.isandrew.passworth";
@@ -127,7 +129,7 @@ let
         
         # Assemble browser bits
         ${pkgs.coreutils}/bin/mkdir -p browser_wasm
-        ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/popup.wasm --out-name popup2 --out-dir browser_wasm
+        ${native}/bin/bind_wasm --in-wasm ${wasmUnbound}/bin/browser-popup.wasm --out-name popup2 --out-dir browser_wasm
         version=$(${pkgs.gnugrep}/bin/grep "^version =" ${./shared/Cargo.toml} | ${pkgs.gnused}/bin/sed -e "s/.*\"\(.*\)\".*/\1/")
         set browser_src/browser_manifest.json _PLACEHOLDER_VERSION "$version"
 
