@@ -8,43 +8,11 @@ use {
     },
 };
 
+/// Register a process with the demon with the listed tags. The tags can be matched
+/// in rules. Any user can register a process.
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct C2SGenerateVariantBytes {
-    pub length: usize,
-}
-
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct C2SGenerateVariantSafeAlphanumeric {
-    pub length: usize,
-}
-
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct C2SGenerateVariantAlphanumeric {
-    pub length: usize,
-}
-
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct C2SGenerateVariantAlphanumericSymbols {
-    pub length: usize,
-}
-
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum C2SGenerateVariant {
-    Bytes(C2SGenerateVariantBytes),
-    SafeAlphanumeric(C2SGenerateVariantSafeAlphanumeric),
-    Alphanumeric(C2SGenerateVariantAlphanumeric),
-    AlphanumericSymbols(C2SGenerateVariantAlphanumericSymbols),
-    Pgp,
-    Ssh,
-}
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct ReqUnlock;
+pub struct ReqTag(pub Vec<String>);
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -106,6 +74,41 @@ pub struct ReqWriteMove {
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct C2SGenerateVariantBytes {
+    pub length: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct C2SGenerateVariantSafeAlphanumeric {
+    pub length: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct C2SGenerateVariantAlphanumeric {
+    pub length: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct C2SGenerateVariantAlphanumericSymbols {
+    pub length: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum C2SGenerateVariant {
+    Bytes(C2SGenerateVariantBytes),
+    SafeAlphanumeric(C2SGenerateVariantSafeAlphanumeric),
+    Alphanumeric(C2SGenerateVariantAlphanumeric),
+    AlphanumericSymbols(C2SGenerateVariantAlphanumericSymbols),
+    Pgp,
+    Ssh,
+}
+
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ReqWriteGenerate {
     pub path: SpecificPath,
     pub variant: C2SGenerateVariant,
@@ -138,8 +141,12 @@ pub struct ReqDerivePgpDecrypt {
 pub struct ReqDeriveOtp {
     pub key: SpecificPath,
 }
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ReqWatch;
 
 reqresp!(pub msg {
+    Tag(ReqTag) =>(),
     Lock(ReqLock) =>(),
     MetaKeys(ReqMetaKeys) => serde_json:: Value,
     MetaRevisions(ReqMetaRevisions) => serde_json:: Value,

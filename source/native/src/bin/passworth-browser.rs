@@ -5,7 +5,7 @@ use {
         ResultContext,
     },
     passworth::ipc,
-    passworth_native::proto::ipc_path,
+    passworth_shared_native::proto::ipc_path,
     tokio::io::{
         AsyncReadExt,
         AsyncWriteExt,

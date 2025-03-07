@@ -4,3 +4,4 @@ pub mod dbutil;
 pub mod fg;
 pub mod factor;
 pub mod permission;
+pub mod pidfd;

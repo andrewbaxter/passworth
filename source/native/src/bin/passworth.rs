@@ -35,7 +35,12 @@ use {
             get_card_pubkey,
             CardStream,
         },
-        proto::ipc_path,
+    },
+    passworth_shared_native::{
+        proto::{
+            ipc_path,
+            req,
+        },
     },
     std::{
         io::{
@@ -54,12 +59,6 @@ use {
         task::spawn_blocking,
     },
 };
-
-async fn req<T: ipc::msg::ReqTrait>(body: T) -> Result<T::Resp, loga::Error> {
-    return Ok(
-        ipc::msg::Client::new(ipc_path()).await.map_err(loga::err)?.send_req(body).await.map_err(loga::err)?,
-    );
-}
 
 fn remove_prefix(value: serde_json::Value, path: &SpecificPath) -> serde_json::Value {
     let mut value = value;
@@ -549,21 +548,21 @@ async fn main2() -> Result<(), loga::Error> {
                 key: args.key.0,
                 data: args.data.value,
             }).await?;
-            std::io::stdout().write_all(res.as_bytes()).unwrap();
-            std::io::stdout().flush().unwrap();
+            std::io::stdout().write_all(res.as_bytes())?;
+            std::io::stdout().flush()?;
         },
         Command::DerivePgpDecrypt(args) => {
             let res = req(ipc::ReqDerivePgpDecrypt {
                 key: args.key.0,
                 data: args.data.value,
             }).await?;
-            std::io::stdout().write_all(&res).unwrap();
-            std::io::stdout().flush().unwrap();
+            std::io::stdout().write_all(&res)?;
+            std::io::stdout().flush()?;
         },
         Command::DeriveOtp(args) => {
             let res = req(ipc::ReqDeriveOtp { key: args.key.0 }).await?;
-            std::io::stdout().write_all(res.as_bytes()).unwrap();
-            std::io::stdout().flush().unwrap();
+            std::io::stdout().write_all(res.as_bytes())?;
+            std::io::stdout().flush()?;
         },
         Command::ScanCards => {
             let mut card_stream = CardStream::new(&log);

@@ -52,7 +52,7 @@ use {
         },
         generate::{
             self,
-            BIP39,
+            bip39,
             BIP39_PHRASELEN,
         },
     },
@@ -245,7 +245,7 @@ async fn ui_recovery_entry(
 ) -> Option<Vec<u8>> {
     let layout = vbox();
     layout.append(&label(message));
-    let word_set = Rc::new(BIP39.iter().map(|x| *x).collect::<HashSet<_>>());
+    let word_set = Rc::new(bip39().iter().map(|x| *x).collect::<HashSet<_>>());
     let form_layout = grid();
     let mut entries = vec![];
     let mut tab_order = vec![];
@@ -609,6 +609,7 @@ enum Title {
     Prompt(String),
 }
 
+/// Retry ui interaction as long as there are errors. `Ok(None)` aborts.
 async fn ui_loop<
     T,
     F: Future<Output = Result<Option<T>, UiErr>>,

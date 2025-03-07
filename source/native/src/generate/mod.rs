@@ -1,5 +1,4 @@
 use {
-    include_lines::include_lines,
     rand::{
         rng,
         seq::IndexedRandom,
@@ -7,11 +6,16 @@ use {
     },
 };
 
-pub const BIP39: [&'static str; 2048] = include_lines!("src/generate/bip39.txt");
 pub const BIP39_PHRASELEN: usize = 12;
 
+pub fn bip39() -> Vec<&'static str> {
+    let lines = include_str!("bip39.txt").lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2048);
+    return lines;
+}
+
 pub fn gen_bip39() -> Vec<String> {
-    return BIP39.choose_multiple(&mut rng(), BIP39_PHRASELEN).map(|x| x.to_string()).collect::<Vec<_>>();
+    return bip39().choose_multiple(&mut rng(), BIP39_PHRASELEN).map(|x| x.to_string()).collect::<Vec<_>>();
 }
 
 pub fn gen_bytes(len: usize) -> Vec<u8> {

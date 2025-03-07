@@ -69,6 +69,17 @@ pub enum UserGroupId {
     Id(u32),
 }
 
+/// Match a single process or ancestor with both a tag set by `passworth-tag` and a
+/// specific user id.
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct MatchTag {
+    /// This is a tag set by `passworth-tag`.
+    pub tag: String,
+    pub user: UserGroupId,
+}
+
+/// Match a single process run as a specific user and/or group.
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MatchUser {
@@ -77,19 +88,26 @@ pub struct MatchUser {
     #[serde(default)]
     pub group: Option<UserGroupId>,
     /// Sufficient if any ancestor up to this number of steps away from the process
-    /// matches (excluding the process itself). Defaults to 0.
+    /// doing IPC matches (excluding the process itself). Defaults to 0.
     #[serde(default)]
     pub walk_ancestors: usize,
 }
 
+/// Match a single process running a specific binary. Note that this will match
+/// interpreters for scripts, not the script being run (even if the script is run
+/// directly via shebang).
 #[derive(Serialize, Deserialize, Clone, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MatchBinary {
-    pub path: PathBuf,
     /// Sufficient if any ancestor up to this number of steps away from the process
-    /// matches (excluding the process itself). Defaults to 0.
+    /// doing IPC matches (excluding the process itself). Defaults to 0.
     #[serde(default)]
     pub walk_ancestors: usize,
+    /// The absolute path of an executable to match.
+    pub path: PathBuf,
+    /// The first argument (excluding argument 0, the exe itself) is a path that's
+    /// present in the root filesystem, the argument.
+    pub first_arg_path: Option<PathBuf>,
 }
 
 /// Actions permitted by a rule. Later levels include all prior levels.
@@ -117,9 +135,10 @@ pub struct ConfigPermissionRule {
     /// or `*`. `*` is a wildcard, and must appear as a whole segment. `*` and `/` can
     /// be escaped with a backslash.
     pub paths: Vec<String>,
-    /// Match requesting processes against a systemd service name (via service pid).
+    /// Match requesting processes against a tag name (via passworth-tag) and tagging
+    /// user.
     #[serde(default)]
-    pub match_systemd: Option<String>,
+    pub match_tag: Option<MatchTag>,
     /// Match requesting processes against the process or a parent process owner.
     #[serde(default)]
     pub match_user: Option<MatchUser>,

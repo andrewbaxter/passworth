@@ -1,0 +1,13 @@
+[package]
+name = "passworth-native-no-systemd"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+aargvark = { version = "0.8", features = ["serde_json"] }
+loga = "0.5"
+tokio = { version = "1", features = ["macros", "rt"] }
+passworth = { path = "../shared" }
+passworth-shared-native = { path = "../shared-native" }
+nix = { version = "0.29", features = ["process", "fs"] }

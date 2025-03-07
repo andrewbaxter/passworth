@@ -34,6 +34,7 @@ use {
         ea,
         fatal,
         DebugDisplay,
+        ErrContext,
         Log,
         ResultContext,
     },
@@ -46,8 +47,8 @@ use {
         config,
         crypto::pgp_from_armor,
         generate,
-        proto::ipc_path,
     },
+    passworth_shared_native::proto::ipc_path,
     sequoia_openpgp::{
         cert::CertBuilder,
         packet::{
@@ -83,6 +84,10 @@ use {
             B2FInitialize,
             B2FUnlock,
         },
+        pidfd::{
+            pidfd,
+            Inode,
+        },
         privdb,
         pubdb,
     },
@@ -98,7 +103,10 @@ use {
             Cursor,
             Write,
         },
-        os::unix::fs::PermissionsExt,
+        os::{
+            fd::OwnedFd,
+            unix::fs::PermissionsExt,
+        },
         path::PathBuf,
         str::FromStr,
         sync::{
@@ -113,6 +121,7 @@ use {
             self,
             create_dir_all,
         },
+        io::unix::AsyncFdReadyGuard,
         select,
         spawn,
         sync::{
@@ -614,6 +623,7 @@ async fn main2() -> Result<(), loga::Error> {
 
         let tm = tm.clone();
         let log = log.clone();
+        let tags = Arc::new(Mutex::new(HashMap::<Inode, HashSet<String>>::new()));
         let rules = rules.clone();
         let state = state.clone();
         let activity = activity.clone();
@@ -636,12 +646,12 @@ async fn main2() -> Result<(), loga::Error> {
                         break;
                     },
                 };
+                let tags = tags.clone();
                 spawn(async move {
                     match async {
                         let peer = conn.0.peer_cred()?;
                         let pid = peer.pid().context("OS didn't provide PID for peer")?;
-                        let principal =
-                            scan_principal(&log, rules.any_match_systemd, rules.any_match_binary, pid).await?;
+                        let principal = scan_principal(&log, &tags, pid).await?;
 
                         // Helpers for command processing
                         fn set(txn: &mut rusqlite::Transaction, pairs: Vec<(SpecificPath, serde_json::Value)>) -> Result<(), loga::Error> {
@@ -748,6 +758,38 @@ async fn main2() -> Result<(), loga::Error> {
                             match async {
                                 let resp;
                                 match req {
+                                    ipc::msg::ServerReq::Tag(rr, req) => {
+                                        eprintln!("DEBUG tagging {} with {:?}", pid, req.0);
+                                        let (pidfd_inode, pidfd) =
+                                            pidfd(pid).await.context("Error resolving pidfd of peer")?;
+                                        eprintln!("Tagging inode {}", pidfd_inode.0);
+                                        tags.lock().unwrap().insert(pidfd_inode, req.0.into_iter().collect());
+                                        spawn({
+                                            let log = log.clone();
+                                            let tags = tags.clone();
+                                            async move {
+                                                let _: Option<AsyncFdReadyGuard<OwnedFd>> =
+                                                    match pidfd.readable().await {
+                                                        Ok(x) => Some(x),
+                                                        Err(e) => {
+                                                            log.log_err(
+                                                                loga::WARN,
+                                                                e.context(
+                                                                    format!(
+                                                                        "Error waiting for pidfd for pid {:?} to report readable",
+                                                                        pid
+                                                                    ),
+                                                                ),
+                                                            );
+                                                            None
+                                                        },
+                                                    };
+                                                eprintln!("Untagging inode {}", pidfd_inode.0);
+                                                tags.lock().unwrap().remove(&pidfd_inode);
+                                            }
+                                        });
+                                        resp = rr(());
+                                    },
                                     ipc::msg::ServerReq::Lock(rr, req) => {
                                         if !permission::permit(
                                             &log,

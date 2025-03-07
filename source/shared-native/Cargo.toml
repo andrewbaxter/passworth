@@ -1,0 +1,10 @@
+[package]
+name = "passworth-shared-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+glove = { version = "0.4", features = ["unix"] }
+passworth = { path = "../shared" }
+loga = "0.5"

@@ -36,7 +36,6 @@ chacha20poly1305 = "0.10"
 generic-array = { version = "0.14", features = ["serde"] }
 defer = "0.2"
 rand = "0.9"
-include-lines = "1"
 users = "0.11"
 libsqlite3-sys = { version = "0.31", features = ["bundled-sqlcipher"] }
 flowcontrol = "0.2"
@@ -47,9 +46,11 @@ ssh-key = { version = "0.6", features = ["crypto"] }
 totp-rs = { version = "5", features = ["otpauth"] }
 async-tempfile = "0.7"
 passworth = { path = "../shared" }
+passworth-shared-native = { path = "../shared-native" }
 zbase32 = "0.1"
 wasm-bindgen-cli-support = "=0.2.100"
 wasm2map = "0.1"
+rustix = { version = "0.38", features = ["fs", "process"] }
 
 [build-dependencies]
 good-ormning = { version = "0.3", features = ["sqlite", "chrono"] }
