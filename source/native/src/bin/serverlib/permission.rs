@@ -429,34 +429,22 @@ pub async fn scan_principal(
         };
         chain1.push(meta);
     }
-    log.log_with(
-        loga::DEBUG,
-        "Scan process results",
-        ea!(
-            meta =
-                chain1
-                    .iter()
-                    .map(
-                        |x| format!(
-                            "Pid {}\n{}",
-                            x.pid,
-                            [
-                                ("uid", x.uid.dbg_str()),
-                                ("gid", x.gid.dbg_str()),
-                                ("binary", x.binary.dbg_str()),
-                                ("first_arg_path", x.first_arg_path.dbg_str()),
-                                ("tags", x.tags.dbg_str()),
-                            ]
-                                .into_iter()
-                                .map(|(k, v)| format!("- {} [{}]", k, v))
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        ),
-                    )
-                    .collect::<Vec<_>>()
-                    .join("\n")
-        ),
-    );
+    log.log_with(loga::DEBUG, "Scan process results", ea!(meta = chain1.iter().map(|x| format!(
+        //. .
+        "Pid {}\n{}",
+        x.pid,
+        [
+            ("uid", x.uid.dbg_str()),
+            ("gid", x.gid.dbg_str()),
+            ("binary", x.binary.dbg_str()),
+            ("first_arg_path", x.first_arg_path.dbg_str()),
+            ("tags", x.tags.dbg_str()),
+        ]
+            .into_iter()
+            .map(|(k, v)| format!("- {} [{}]", k, v))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )).collect::<Vec<_>>().join("\n\n")));
     return Ok(PrincipalMeta { chain: chain1 });
 }
 
