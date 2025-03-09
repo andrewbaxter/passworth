@@ -10,10 +10,18 @@ use {
     flowcontrol::shed,
     gtk4::{
         gdk::{
+            prelude::DisplayExt,
             Key,
             ModifierType,
+            Monitor,
         },
-        glib::object::Cast,
+        gio::prelude::ListModelExt,
+        glib::{
+            object::{
+                Cast,
+                ObjectExt,
+            },
+        },
         prelude::{
             BoxExt,
             ButtonExt,
@@ -29,6 +37,7 @@ use {
         Application,
         Label,
     },
+    gtk4_layer_shell::LayerShell,
     loga::{
         conversion::ResultIgnore,
         ea,
@@ -576,11 +585,30 @@ async fn ui_window(app: &Application, title: Title, body: &impl gtk4::glib::obje
         Title::Unlock(x) => format!("Unlock [{}]", x),
         Title::Prompt(x) => format!("Prompt [{}]", x),
     })).resizable(false).build();
+    window.init_layer_shell();
+    window.set_layer(gtk4_layer_shell::Layer::Overlay);
+    window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::Exclusive);
     window.connect_unrealize({
         let close_tx = RefCell::new(Some(close_tx));
         move |_| {
             close_tx.borrow_mut().take().unwrap().send(()).ignore();
         }
+    });
+    let display = RootExt::display(&window);
+    let monitor_listener = display.monitors().connect_items_changed({
+        let window = window.clone();
+        move |list, position, removed_count, _added_count| {
+            // Issues with layer-shell https://github.com/wmww/gtk-layer-shell/issues/135 -
+            // just close the window for now
+            for i in position .. position + removed_count {
+                if window.monitor() == list.item(i).map(|x| x.dynamic_cast::<Monitor>().unwrap()) {
+                    window.close();
+                }
+            }
+        }
+    });
+    defer::defer(move || {
+        display.monitors().disconnect(monitor_listener);
     });
     let wrap = vbox();
     wrap.set_margin_bottom(SPACING2V);

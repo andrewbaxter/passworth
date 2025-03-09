@@ -1,5 +1,4 @@
 use {
-    good_ormning_runtime::sqlite::GoodOrmningCustomString,
     schemars::JsonSchema,
     serde::{
         Deserialize,
@@ -74,8 +73,13 @@ pub enum UserGroupId {
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MatchTag {
-    /// This is a tag set by `passworth-tag`.
+    /// Sufficient if any ancestor up to this number of steps away from the process
+    /// doing IPC matches (excluding the process itself). Defaults to 0.
+    #[serde(default)]
+    pub walk_ancestors: usize,
+    /// The target or ancestor must have this tag.
     pub tag: String,
+    /// The target or ancestor must have this owner user.
     pub user: UserGroupId,
 }
 
@@ -83,14 +87,16 @@ pub struct MatchTag {
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MatchUser {
-    #[serde(default)]
-    pub user: Option<UserGroupId>,
-    #[serde(default)]
-    pub group: Option<UserGroupId>,
     /// Sufficient if any ancestor up to this number of steps away from the process
     /// doing IPC matches (excluding the process itself). Defaults to 0.
     #[serde(default)]
     pub walk_ancestors: usize,
+    /// The target or ancestor must have this owner user.
+    #[serde(default)]
+    pub user: Option<UserGroupId>,
+    /// The target or ancestor must have this owner group.
+    #[serde(default)]
+    pub group: Option<UserGroupId>,
 }
 
 /// Match a single process running a specific binary. Note that this will match
@@ -155,28 +161,25 @@ pub struct ConfigPermissionRule {
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct Config {
-    #[serde(rename = "$schema", skip_serializing)]
-    pub _schema: Option<String>,
-    /// A directory where this will store sqlite databases.
-    pub data_path: PathBuf,
-    /// Lock if no successful activity for this many seconds.
-    pub lock_timeout: u64,
+pub struct UnlockFactorsConfig {
     /// How to unlock the database when credentials are accessed. These form a tree via
     /// references.
     pub auth_factors: Vec<ConfigAuthFactor>,
     /// Which factor forms the root of the tree (provides the database key).
     pub root_factor: String,
-    /// Permissions for processes to access subtrees.
-    pub access: Vec<ConfigPermissionRule>,
 }
 
-impl GoodOrmningCustomString<Config> for Config {
-    fn to_sql<'a>(value: &'a Config) -> String {
-        return serde_json::to_string(&value).unwrap().into();
-    }
-
-    fn from_sql(value: String) -> Result<Config, String> {
-        return serde_json::from_str(&value).map_err(|e| e.to_string());
-    }
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct Config {
+    #[serde(rename = "$schema", skip_serializing)]
+    pub _schema: Option<String>,
+    /// A directory where this will store sqlite databases.
+    pub data_path: PathBuf,
+    #[serde(flatten)]
+    pub unlock_config: UnlockFactorsConfig,
+    /// Lock if no successful activity for this many seconds.
+    pub lock_timeout: u64,
+    /// Permissions for processes to access subtrees.
+    pub access: Vec<ConfigPermissionRule>,
 }

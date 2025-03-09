@@ -2,7 +2,14 @@
 let
   pkgs = import <nixpkgs> { };
   lib = import (<nixpkgs> + "/lib");
-  browser = import ./browser.nix { pkgs = pkgs; lib = lib; debug = debug; };
+  native = import ./nixbuild/native/package.nix { pkgs = pkgs; lib = lib; };
+  browser = import ./browser.nix {
+    pkgs = pkgs // {
+      passworth = native;
+    };
+    lib = lib;
+    debug = debug;
+  };
 in
 derivation {
   name = "passworth-firefox.zip";

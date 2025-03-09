@@ -4,7 +4,7 @@ let
 in
 {
   imports = [
-    ./rustbuild/native
+    ./nixbuild/native
   ];
   config = {
     environment.etc = {

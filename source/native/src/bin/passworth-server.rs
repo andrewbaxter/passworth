@@ -200,9 +200,9 @@ async fn main2() -> Result<(), loga::Error> {
     let root_factor =
         build_factor_tree(
             &HashSet::new(),
-            &config.auth_factors.iter().map(|f| (f.id.clone(), f)).collect(),
+            &config.unlock_config.auth_factors.iter().map(|f| (f.id.clone(), f)).collect(),
             &mut HashMap::new(),
-            &config.root_factor,
+            &config.unlock_config.root_factor,
         )?;
 
     // Start fg thread
@@ -292,7 +292,7 @@ async fn main2() -> Result<(), loga::Error> {
         pubdb_path: PathBuf,
         privdb_path: PathBuf,
         root_factor: Arc<FactorTree>,
-        token: Mutex<TokenState>,
+        token_state: Mutex<TokenState>,
         fg_tx: tokio::sync::mpsc::Sender<B2F>,
         lock_timeout: u64,
     }
@@ -314,7 +314,7 @@ async fn main2() -> Result<(), loga::Error> {
         pubdb_path: pubdb_path.clone(),
         root_factor: root_factor.clone(),
         fg_tx: fg_tx,
-        token: Mutex::new(TokenState {
+        token_state: Mutex::new(TokenState {
             token: None,
             wait_sub: None,
         }),
@@ -334,17 +334,17 @@ async fn main2() -> Result<(), loga::Error> {
         }
         if let Some(previous_config) =
             pubdb::config_get(&mut pubdbc).context("Error reading previous config for config migrations")? {
-            let previous_config = match previous_config {
-                config::Config::V1(config) => config,
+            let previous_unlock_config = match previous_config {
+                config::UnlockConfig::V1(config) => config,
             };
 
             // Previous config existed
             let prev_root_factor =
                 build_factor_tree(
                     &HashSet::new(),
-                    &previous_config.auth_factors.iter().map(|f| (f.id.clone(), f)).collect(),
+                    &previous_unlock_config.auth_factors.iter().map(|f| (f.id.clone(), f)).collect(),
                     &mut HashMap::new(),
-                    &previous_config.root_factor,
+                    &previous_unlock_config.root_factor,
                 )?;
 
             // Diff with old to check what tokens/state changed, get list of still-active
@@ -499,7 +499,7 @@ async fn main2() -> Result<(), loga::Error> {
                 for (k, v) in &init_result.store_state {
                     pubdb::factor_add(txn, &k, &v).context_with("Error storing new factor data", ea!(factor = k))?;
                 }
-                pubdb::config_set(txn, &config::Config::V1(config))?;
+                pubdb::config_set(txn, &config::UnlockConfig::V1(config.unlock_config))?;
                 if root_token_changed {
                     let Some(root_token) = init_result.root_token else {
                         panic!();
@@ -520,7 +520,8 @@ async fn main2() -> Result<(), loga::Error> {
             }).await.context("Error committing new unlock credentials")?;
         }
         else {
-            let all_factors = config.auth_factors.iter().map(|x| x.id.clone()).collect::<HashSet<_>>();
+            let all_factors =
+                config.unlock_config.auth_factors.iter().map(|x| x.id.clone()).collect::<HashSet<_>>();
             let (resp_tx, resp_rx) = oneshot::channel();
             state.fg_tx.send(B2F::Initialize(B2FInitialize {
                 privdbc: None,
@@ -542,7 +543,7 @@ async fn main2() -> Result<(), loga::Error> {
                 for (k, v) in &init_result.store_state {
                     pubdb::factor_add(txn, &k, &v).context_with("Error storing new factor data", ea!(factor = k))?;
                 }
-                pubdb::config_set(txn, &config::Config::V1(config))?;
+                pubdb::config_set(txn, &config::UnlockConfig::V1(config.unlock_config))?;
                 return Ok(());
             }).await.context("Error committing new unlock credentials")?;
         }
@@ -571,18 +572,18 @@ async fn main2() -> Result<(), loga::Error> {
             }
 
             let privdbc = match {
-                let mut token = state.token.lock().unwrap();
-                match &token.token {
+                let mut token_state = state.token_state.lock().unwrap();
+                match &token_state.token {
                     Some(t) => Invert::Ready { token: t.clone() },
                     None => {
-                        match &token.wait_sub {
+                        match &token_state.wait_sub {
                             Some(s) => {
                                 let token_rx = s.subscribe();
                                 Invert::Waiting { token_rx: token_rx }
                             },
                             None => {
                                 let (token_tx, _) = broadcast::channel(1);
-                                token.wait_sub = Some(token_tx.clone());
+                                token_state.wait_sub = Some(token_tx.clone());
                                 Invert::Missing { token_tx: token_tx }
                             },
                         }
@@ -602,17 +603,18 @@ async fn main2() -> Result<(), loga::Error> {
                     for t in pubdb::factor_list(&mut pubdbc)? {
                         factor_state.insert(t.id, t.state);
                     }
-                    let (fg_tx, fg_rx) = oneshot::channel();
+                    let (fg_result_tx, fg_result_rx) = oneshot::channel();
                     state.fg_tx.send(B2F::Unlock(B2FUnlock {
                         privdb_path: state.privdb_path.clone(),
                         root_factor: state.root_factor.clone(),
                         state: factor_state,
-                    }, fg_tx)).await.ignore();
-                    let res = fg_rx.await?.context("Error during fg unlock")?.context("User closed unlock window")?;
+                    }, fg_result_tx)).await.ignore();
+                    let res = fg_result_rx.await;
 
-                    // Update shared token + return
-                    let mut token = state.token.lock().unwrap();
+                    // Handle result
+                    let mut token = state.token_state.lock().unwrap();
                     token.wait_sub = None;
+                    let res = res?.context("Error during fg unlock")?.context("User closed unlock window")?;
                     token.token = Some(res.root_token.clone());
                     token_tx.send(res.root_token.clone()).ignore();
                     res.privdbc
@@ -804,7 +806,7 @@ async fn main2() -> Result<(), loga::Error> {
                                         }
                                         match req.0 {
                                             ipc::LockAction::Lock => {
-                                                state.token.lock().unwrap().token = None;
+                                                state.token_state.lock().unwrap().token = None;
                                             },
                                             ipc::LockAction::Unlock => {
                                                 get_privdb(&state).await?;
@@ -1431,7 +1433,7 @@ async fn main2() -> Result<(), loga::Error> {
                     },
                     if next.is_some() => {
                         log.log(loga::DEBUG, "Activity timeout, locking");
-                        state.token.lock().unwrap().token = None;
+                        state.token_state.lock().unwrap().token = None;
                     }
                 }
             }

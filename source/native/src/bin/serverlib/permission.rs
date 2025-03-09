@@ -32,6 +32,7 @@ use {
         },
         v1::PermitLevel,
     },
+    serde::Serialize,
     std::{
         collections::{
             HashMap,
@@ -74,15 +75,16 @@ use {
     },
 };
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct RuleMatchUser {
+    pub walk_ancestors: usize,
     pub user_id: Option<u32>,
     pub group_id: Option<u32>,
-    pub walk_ancestors: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct RuleMatchTag {
+    pub walk_ancestors: usize,
     pub tag: String,
     pub user_id: u32,
 }
@@ -125,6 +127,7 @@ pub fn build_rule_tree(
             match_binary: rule.match_binary.clone(),
             match_tag: match &rule.match_tag {
                 Some(r) => Some(RuleMatchTag {
+                    walk_ancestors: r.walk_ancestors,
                     tag: r.tag.clone(),
                     user_id: match &r.user {
                         UserGroupId::Name(n) => users
@@ -187,6 +190,7 @@ pub fn build_rule_tree(
     });
 }
 
+#[derive(Debug)]
 pub struct PrincipalMetaProc {
     pid: i32,
     uid: Option<u32>,
@@ -387,7 +391,6 @@ pub async fn scan_principal(
             Box::pin(async move {
                 match async {
                     let pidfd_inode = pidfd(at).await?.0;
-                    eprintln!("Found proc inode {:?} for orig pid {}, parent {}", pid, at, pidfd_inode.0);
                     return Ok(tags.lock().unwrap().get(&pidfd_inode).cloned()) as Result<_, loga::Error>;
                 }.await {
                     Ok(x) => x,
@@ -398,11 +401,6 @@ pub async fn scan_principal(
                 }
             })
         };
-        log.log_with(
-            loga::DEBUG,
-            format!("Scan principal: scan PID {}", at),
-            ea!(uid = uid.dbg_str(), gid = gid.dbg_str(), binary = binary.dbg_str()),
-        );
         chain0.push(AsyncPrincipalMetaProc {
             pid: at,
             uid: uid,
@@ -421,15 +419,44 @@ pub async fn scan_principal(
     }
     let mut chain1 = vec![];
     for e in chain0 {
-        chain1.push(PrincipalMetaProc {
+        let meta = PrincipalMetaProc {
             pid: e.pid,
             uid: e.uid,
             gid: e.gid,
             binary: e.binary.await?,
             first_arg_path: e.first_arg_path.await?,
             tags: e.tags.await,
-        });
+        };
+        chain1.push(meta);
     }
+    log.log_with(
+        loga::DEBUG,
+        "Scan process results",
+        ea!(
+            meta =
+                chain1
+                    .iter()
+                    .map(
+                        |x| format!(
+                            "Pid {}\n{}",
+                            x.pid,
+                            [
+                                ("uid", x.uid.dbg_str()),
+                                ("gid", x.gid.dbg_str()),
+                                ("binary", x.binary.dbg_str()),
+                                ("first_arg_path", x.first_arg_path.dbg_str()),
+                                ("tags", x.tags.dbg_str()),
+                            ]
+                                .into_iter()
+                                .map(|(k, v)| format!("- {} [{}]", k, v))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        ),
+                    )
+                    .collect::<Vec<_>>()
+                    .join("\n")
+        ),
+    );
     return Ok(PrincipalMeta { chain: chain1 });
 }
 
@@ -473,37 +500,19 @@ pub async fn permit(
             let seg = segs.next();
             for tail in tails.drain(..) {
                 for rule in &tail.rules {
-                    let mut matched = true;
+                    let mut rule_result = true;
                     if let Some(match_binary) = &rule.match_binary {
-                        let submatch = shed!{
+                        let match_result = shed!{
                             'submatch _;
                             for (depth, proc) in principal.chain.iter().enumerate() {
                                 shed!{
                                     'fail _;
                                     if proc.binary.as_ref() != Some(&match_binary.path) {
-                                        log.log(
-                                            loga::DEBUG,
-                                            format!(
-                                                "Permit: Binary mismatch at [{}], got {} want {}",
-                                                proc.pid,
-                                                proc.binary.dbg_str(),
-                                                match_binary.path.dbg_str()
-                                            ),
-                                        );
                                         break 'fail;
                                     }
                                     log.log(loga::DEBUG, format!("Permit: MATCHED binary at [{}]", proc.pid));
                                     if let Some(match_first_arg) = &match_binary.first_arg_path {
                                         if proc.first_arg_path.as_ref() != Some(match_first_arg) {
-                                            log.log(
-                                                loga::DEBUG,
-                                                format!(
-                                                    "Permit: Binary first arg mismatch at [{}], got {:?} want {:?}",
-                                                    proc.pid,
-                                                    proc.first_arg_path.dbg_str(),
-                                                    match_first_arg.dbg_str()
-                                                ),
-                                            );
                                             break 'fail;
                                         }
                                         log.log(
@@ -514,25 +523,22 @@ pub async fn permit(
                                     break 'submatch true;
                                 }
                                 if depth >= match_binary.walk_ancestors {
-                                    log.log(
-                                        loga::DEBUG,
-                                        format!(
-                                            "Permit: Didn't match binary at [{}], depth {}, not walking ancestors",
-                                            proc.pid,
-                                            depth
-                                        ),
-                                    );
                                     break 'submatch false;
                                 }
                             }
                             break 'submatch false;
                         };
-                        matched = matched && submatch;
+                        log.log_with(
+                            loga::DEBUG,
+                            format!("Permit: Match binary result: {}", match_result),
+                            ea!(match_ = serde_json::to_string_pretty(&match_binary).unwrap()),
+                        );
+                        rule_result = rule_result && match_result;
                     }
                     if let Some(match_tag) = &rule.match_tag {
-                        let submatch = shed!{
+                        let match_result = shed!{
                             'submatch _;
-                            for proc in &principal.chain {
+                            for (depth, proc) in principal.chain.iter().enumerate() {
                                 let tags = proc.tags.as_ref();
                                 if tags.map(|x| x.contains(&match_tag.tag)).unwrap_or(false) &&
                                     proc.uid.as_ref() == Some(&match_tag.user_id) {
@@ -547,53 +553,32 @@ pub async fn permit(
                                     );
                                     break 'submatch true;
                                 }
-                                log.log(
-                                    loga::DEBUG,
-                                    format!(
-                                        "Permit: Tag mismatch at [{}], got tags {:?}, uid {:?}, want tags {}, uid {}",
-                                        proc.pid.dbg_str(),
-                                        tags,
-                                        proc.uid,
-                                        match_tag.tag,
-                                        match_tag.user_id,
-                                    ),
-                                );
+                                if depth >= match_tag.walk_ancestors {
+                                    break 'submatch false;
+                                }
                             }
                             break 'submatch false;
                         };
-                        matched = matched && submatch;
+                        log.log_with(
+                            loga::DEBUG,
+                            format!("Permit: Match tag result: {}", match_result),
+                            ea!(match_ = serde_json::to_string_pretty(&match_tag).unwrap()),
+                        );
+                        rule_result = rule_result && match_result;
                     }
                     if let Some(match_user) = &rule.match_user {
-                        let submatch = shed!{
+                        let match_result = shed!{
                             'submatch _;
                             for (depth, proc) in principal.chain.iter().enumerate() {
                                 shed!{
                                     if let Some(match_user_id) = &match_user.user_id {
                                         if proc.uid.as_ref() != Some(match_user_id) {
-                                            log.log(
-                                                loga::DEBUG,
-                                                format!(
-                                                    "Permit: UID mismatch at [{}], got {} want {}",
-                                                    proc.pid,
-                                                    proc.uid.dbg_str(),
-                                                    match_user_id
-                                                ),
-                                            );
                                             break;
                                         }
                                         log.log(loga::DEBUG, format!("Permit: MATCHED UID at [{}]", proc.pid));
                                     }
                                     if let Some(match_group_id) = &match_user.group_id {
                                         if proc.gid.as_ref() != Some(match_group_id) {
-                                            log.log(
-                                                loga::DEBUG,
-                                                format!(
-                                                    "Permit: GID mismatch at [{}], got {} want {}",
-                                                    proc.pid,
-                                                    proc.gid.dbg_str(),
-                                                    match_group_id
-                                                ),
-                                            );
                                             break;
                                         }
                                         log.log(loga::DEBUG, format!("Permit: MATCHED GID at [{}]", proc.pid));
@@ -601,23 +586,21 @@ pub async fn permit(
                                     break 'submatch true;
                                 }
                                 if depth >= match_user.walk_ancestors {
-                                    matched = false;
-                                    log.log(
-                                        loga::DEBUG,
-                                        format!(
-                                            "Permit: Didn't match user at [{}], depth {}, not walking ancestors",
-                                            proc.pid,
-                                            depth
-                                        ),
-                                    );
+                                    rule_result = false;
                                     break;
                                 }
                             }
                             break 'submatch false;
                         };
-                        matched = matched && submatch;
+                        log.log_with(
+                            loga::DEBUG,
+                            format!("Permit: Match user result: {}", match_result),
+                            ea!(match_ = serde_json::to_string_pretty(&match_user).unwrap()),
+                        );
+                        rule_result = rule_result && match_result;
                     }
-                    if !matched {
+                    log.log(loga::DEBUG, format!("Permit: Rule result: {}", rule_result));
+                    if !rule_result {
                         continue;
                     }
 

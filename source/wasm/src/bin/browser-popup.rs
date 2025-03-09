@@ -248,14 +248,25 @@ async fn get_active_tab() -> (JsValue, JsValue) {
     panic!("Couldn't find active tab");
 }
 
-async fn send_to_content(message: impl Serialize) {
+async fn send_to_content(message: impl Serialize) -> Result<(), String> {
     let (tabs, tab) = get_active_tab().await;
-    js_call2(
-        &tabs,
-        "sendMessage",
-        &js_sys::Reflect::get(&tab, &JsValue::from("id")).unwrap(),
-        &JsValue::from_serde(&message).unwrap(),
-    );
+    let res =
+        JsFuture::from(
+            js_call2(
+                &tabs,
+                "sendMessage",
+                &js_sys::Reflect::get(&tab, &JsValue::from("id")).unwrap(),
+                &JsValue::from_serde(&message).unwrap(),
+            )
+                .dyn_into::<Promise>()
+                .unwrap(),
+        )
+            .await
+            .unwrap();
+    if res.is_null() {
+        return Ok(());
+    }
+    return Err(res.as_string().unwrap());
 }
 
 fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: String) {
@@ -328,7 +339,7 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
                             send_to_content(ToContent::FillField(ToContentField { text: force_string(
                                 //. .
                                 dig(&resp, &path.0).ok_or_else(|| format!("Response missing expected data path ancestry"))?,
-                            ) })).await;
+                            ) })).await?;
                             window().close().unwrap();
                             return Ok(());
                         }
@@ -346,7 +357,7 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
                                     async move {
                                         save_search_path(&state);
                                         let resp = send_to_native(ipc::ReqDeriveOtp { key: path }).await?;
-                                        send_to_content(ToContent::FillField(ToContentField { text: resp })).await;
+                                        send_to_content(ToContent::FillField(ToContentField { text: resp })).await?;
                                         window().close().unwrap();
                                         return Ok(());
                                     }
@@ -394,7 +405,7 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
                                 send_to_content(ToContent::FillUserPassword(ToContentUserPassword {
                                     user: force_string(&user),
                                     password: force_string(dig(&resp, &password_path.0).unwrap()),
-                                })).await;
+                                })).await?;
                                 window().close().unwrap();
                                 return Ok(());
                             }

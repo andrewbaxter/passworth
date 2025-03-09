@@ -51,6 +51,7 @@ zbase32 = "0.1"
 wasm-bindgen-cli-support = "=0.2.100"
 wasm2map = "0.1"
 rustix = { version = "0.38", features = ["fs", "process"] }
+gtk4-layer-shell = "0.5"
 
 [build-dependencies]
 good-ormning = { version = "0.3", features = ["sqlite", "chrono"] }

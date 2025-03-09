@@ -138,7 +138,6 @@ const setInputValue = (el0, value) => {
 
 browser.runtime.onMessage.addListener((message0, _, responder) => {
     try {
-        responder(null);
         const message = /** @type {Message} */(message0);
         switch (message.type) {
             case "fill_user_password":
@@ -325,8 +324,7 @@ browser.runtime.onMessage.addListener((message0, _, responder) => {
                         }
 
                         // No match, abort
-                        console.log("Passworth: no login form found by any selector")
-                        return;
+                        throw "Couldn't find anything that looks like a login form";
 
                     } while (false);
 
@@ -362,19 +360,19 @@ browser.runtime.onMessage.addListener((message0, _, responder) => {
                 break;
 
             case "fill_field":
-                if (lastFocus != null) {
-                    setInputValue(lastFocus, message.text);
-                    console.log("Passworth: set value on element", lastFocus)
-                } else {
-                    console.log("Passworth: no focus found")
+                if (lastFocus == null) {
+                    throw "No focused inputs in history";
                 }
+                console.log("Passworth: set value on element", lastFocus)
+                setInputValue(lastFocus, message.text);
 
                 break;
 
             default:
                 throw ["Invalid message type", message];
         }
+        responder(null);
     } catch (e) {
-        console.log("Passworth: Error processing message", e)
+        responder(`${e}`);
     }
 });

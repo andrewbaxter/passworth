@@ -5,14 +5,6 @@
     fenix.latest.cargo
     fenix.targets.wasm32-unknown-unknown.latest.rust-std
   ];
-  platform = pkgs.makeRustPlatform {
-    cargo = toolchain;
-    rustc = toolchain;
-  };
-  crane = pkgs.callPackage (fetchTarball "https://github.com/ipetkov/crane/archive/75390a36cd0c2cdd5f1aafd8a9f827d7107f2e53.zip") {
-    rustc = toolchain;
-    cargo = toolchain;
-  };
   naersk = pkgs.callPackage (fetchTarball "https://github.com/nix-community/naersk/archive/378614f37a6bee5a3f2ef4f825a73d948d3ae921.zip") {
     rustc = toolchain;
     cargo = toolchain;
