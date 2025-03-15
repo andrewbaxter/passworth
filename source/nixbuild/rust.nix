@@ -18,17 +18,10 @@
         '')
         files);
     in
-    derivation {
-      name = "stage-rust-workspace-${name}";
-      system = builtins.currentSystem;
-      builder = "${pkgs.bash}/bin/bash";
-      args = [
-        (pkgs.writeText "stage-rust-workspace-${name}-builder" ''
-          set -xeu -o pipefail
-          ${pkgs.coreutils}/bin/mkdir $out
-          cd $out
-          ${linkLines}
-        '')
-      ];
-    };
+    pkgs.runCommand "stage-rust-workspace-${name}" { } ''
+      set -xeu -o pipefail
+      ${pkgs.coreutils}/bin/mkdir $out
+      cd $out
+      ${linkLines}
+    '';
 }

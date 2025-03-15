@@ -595,7 +595,12 @@ async fn ui_window(app: &Application, title: Title, body: &impl gtk4::glib::obje
         }
     });
     let display = RootExt::display(&window);
-    let monitor_listener = display.monitors().connect_items_changed({
+    let monitors = display.monitors();
+    if monitors.n_items() == 0 {
+        window.close();
+        return;
+    }
+    let monitor_listener = monitors.connect_items_changed({
         let window = window.clone();
         move |list, position, removed_count, _added_count| {
             // Issues with layer-shell https://github.com/wmww/gtk-layer-shell/issues/135 -
