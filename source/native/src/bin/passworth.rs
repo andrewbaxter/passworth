@@ -341,6 +341,32 @@ enum Command {
     ScanCards,
 }
 
+fn output(data: impl AsRef<[u8]>) -> Result<(), loga::Error> {
+    match std::io::stdout().write_all(data.as_ref()) {
+        Ok(_) => { },
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::BrokenPipe => {
+                return Ok(());
+            },
+            _ => {
+                return Err(e.into());
+            },
+        },
+    }
+    match std::io::stdout().flush() {
+        Ok(_) => { },
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::BrokenPipe => {
+                return Ok(());
+            },
+            _ => {
+                return Err(e.into());
+            },
+        },
+    }
+    return Ok(());
+}
+
 async fn main2() -> Result<(), loga::Error> {
     let log = Log::new_root(loga::INFO);
     match spawn_blocking(|| vark::<Command>()).await.unwrap() {
@@ -352,14 +378,13 @@ async fn main2() -> Result<(), loga::Error> {
                     .send_req_enum(&args.value)
                     .await
                     .map_err(loga::err)?;
-            println!(
-                "{}",
+            output(
                 serde_json::to_string_pretty(
                     &serde_json::from_slice::<serde_json::Value>(
                         &resp,
                     ).context_with("Received invalid JSON response", ea!(resp = String::from_utf8_lossy(&resp)))?,
-                ).unwrap()
-            );
+                ).unwrap(),
+            )?;
         },
         Command::Unlock => {
             req(ipc::ReqLock(ipc::LockAction::Unlock)).await?;
@@ -377,21 +402,21 @@ async fn main2() -> Result<(), loga::Error> {
             res = remove_prefix(res, &args.path.0);
 
             // Output
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            output(serde_json::to_vec_pretty(&res).unwrap())?;
         },
         Command::MetaPgpPubkey(args) => {
             let res = req(ipc::ReqMetaPgpPubkey {
                 path: args.path.0,
                 at: args.revision,
             }).await?;
-            println!("{}", res);
+            output(res)?;
         },
         Command::MetaSshPubkey(args) => {
             let res = req(ipc::ReqMetaSshPubkey {
                 path: args.path.0,
                 at: args.revision,
             }).await?;
-            println!("{}", res);
+            output(res)?;
         },
         Command::Read(args) => {
             let mut res = req(ipc::ReqRead {
@@ -405,13 +430,13 @@ async fn main2() -> Result<(), loga::Error> {
             // Output
             match (args.json.is_some(), &res) {
                 (false, serde_json::Value::String(v)) => {
-                    println!("{}", v);
+                    output(v)?;
                 },
                 (false, serde_json::Value::Null) => {
                     return Err(loga::err("No value found."));
                 },
                 (_, res) => {
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    output(serde_json::to_string_pretty(&res).unwrap())?;
                 },
             }
         },
@@ -420,7 +445,7 @@ async fn main2() -> Result<(), loga::Error> {
                 paths: args.paths.into_iter().map(|x| x.0).collect(),
                 at: args.revision,
             }).await?;
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            output(serde_json::to_string_pretty(&res).unwrap())?;
         },
         Command::Write(args) => {
             let mut data = Vec::new();
@@ -548,21 +573,18 @@ async fn main2() -> Result<(), loga::Error> {
                 key: args.key.0,
                 data: args.data.value,
             }).await?;
-            std::io::stdout().write_all(res.as_bytes())?;
-            std::io::stdout().flush()?;
+            output(res)?;
         },
         Command::DerivePgpDecrypt(args) => {
             let res = req(ipc::ReqDerivePgpDecrypt {
                 key: args.key.0,
                 data: args.data.value,
             }).await?;
-            std::io::stdout().write_all(&res)?;
-            std::io::stdout().flush()?;
+            output(&res)?;
         },
         Command::DeriveOtp(args) => {
             let res = req(ipc::ReqDeriveOtp { key: args.key.0 }).await?;
-            std::io::stdout().write_all(res.as_bytes())?;
-            std::io::stdout().flush()?;
+            output(res)?;
         },
         Command::ScanCards => {
             let mut card_stream = CardStream::new(&log);
