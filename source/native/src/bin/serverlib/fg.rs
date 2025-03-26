@@ -7,7 +7,10 @@ use {
         FactorTree,
         FactorTreeVariant,
     },
-    flowcontrol::shed,
+    flowcontrol::{
+        shed,
+        superif,
+    },
     gtk4::{
         gdk::{
             prelude::DisplayExt,
@@ -16,12 +19,7 @@ use {
             Monitor,
         },
         gio::prelude::ListModelExt,
-        glib::{
-            object::{
-                Cast,
-                ObjectExt,
-            },
-        },
+        glib::object::Cast,
         prelude::{
             BoxExt,
             ButtonExt,
@@ -77,7 +75,9 @@ use {
         Recipient,
     },
     std::{
-        cell::RefCell,
+        cell::{
+            RefCell,
+        },
         collections::{
             hash_map::Entry,
             HashMap,
@@ -588,33 +588,16 @@ async fn ui_window(app: &Application, title: Title, body: &impl gtk4::glib::obje
     window.init_layer_shell();
     window.set_layer(gtk4_layer_shell::Layer::Overlay);
     window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::Exclusive);
-    window.connect_unrealize({
+    window.connect_destroy({
         let close_tx = RefCell::new(Some(close_tx));
         move |_| {
-            close_tx.borrow_mut().take().unwrap().send(()).ignore();
+            let Some(close_tx) = close_tx.borrow_mut().take() else {
+                return;
+            };
+            close_tx.send(()).ignore();
         }
     });
     let display = RootExt::display(&window);
-    let monitors = display.monitors();
-    if monitors.n_items() == 0 {
-        window.close();
-        return;
-    }
-    let monitor_listener = monitors.connect_items_changed({
-        let window = window.clone();
-        move |list, position, removed_count, _added_count| {
-            // Issues with layer-shell https://github.com/wmww/gtk-layer-shell/issues/135 -
-            // just close the window for now
-            for i in position .. position + removed_count {
-                if window.monitor() == list.item(i).map(|x| x.dynamic_cast::<Monitor>().unwrap()) {
-                    window.close();
-                }
-            }
-        }
-    });
-    defer::defer(move || {
-        display.monitors().disconnect(monitor_listener);
-    });
     let wrap = vbox();
     wrap.set_margin_bottom(SPACING2V);
     wrap.set_margin_top(SPACING2V);
@@ -629,6 +612,33 @@ async fn ui_window(app: &Application, title: Title, body: &impl gtk4::glib::obje
         move || window.close()
     });
     window.present();
+    {
+        let monitors = display.monitors();
+        monitors.connect_items_changed({
+            let window = window.clone();
+            let last_monitor = RefCell::new(window.monitor());
+            move |list, position, removed_count, _added_count| {
+                for i in position .. position + removed_count {
+                    if *last_monitor.borrow() == list.item(i).map(|x| x.dynamic_cast::<Monitor>().unwrap()) {
+                        *last_monitor.borrow_mut() = None;
+                    }
+                }
+                if last_monitor.borrow().is_none() {
+                    superif!({
+                        for i in 0 .. position {
+                            break 'found list.item(i).unwrap().dynamic_cast::<Monitor>().unwrap();
+                        }
+                        for i in position .. list.n_items() {
+                            break 'found list.item(i).unwrap().dynamic_cast::<Monitor>().unwrap();
+                        }
+                    } m = 'found {
+                        window.set_monitor(Some(&m));
+                        *last_monitor.borrow_mut() = Some(m);
+                    });
+                }
+            }
+        });
+    }
     let _defer = defer::defer(move || {
         window.close();
     });
