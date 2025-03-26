@@ -8,6 +8,8 @@
       "DOM",
       "DOM.Iterable"
     ],
-    "target": "es2023"
+    "target": "es2023",
+    "noImplicitReturns": true,
+    "strict": true
   }
 }

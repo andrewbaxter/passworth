@@ -1,5 +1,10 @@
+type HasForm = boolean;
+type HasFormMark = boolean;
+type HasPassword = boolean;
+
 type FormInfo = {
-    form: HTMLFormElement,
+    // A ShadowRoot is basically the same as a form, right reddit?
+    form: HTMLFormElement | null,
     searchedForUser: boolean,
     userInput: HTMLInputElement | null,
     passwordInput: HTMLInputElement | null,

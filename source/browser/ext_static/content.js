@@ -1,67 +1,130 @@
 /// <reference path="content.d.ts" />
 
+/** @type { <K, V>(map:Map<K, V>, key: K, default_: () => V) => V } */
+const mapGetOrInsert = (map, key, default_) => {
+    if (map.has(key)) {
+        const out = map.get(key);
+        if (out == null) {
+            throw "unreachable";
+        }
+        return out;
+    }
+    const out = default_();
+    map.set(key, out);
+    return out;
+};
+
+/** @type {(Document|DocumentFragment)[]} */
+const doms = [];
+
+const refreshAllDoms = () => {
+    // Actually only doms with input elements, to make debugging easier
+    doms.splice(0, doms.length);
+    doms.push(document);
+
+    /** @type {number[]} */
+    let inputCounts = [0];
+    /** @type {[boolean, HTMLElement|ShadowRoot][]} */
+    let frontier = [[true, document.body]];
+    while (frontier.length > 0) {
+        const edge_ = frontier.pop();
+        if (edge_ == null) {
+            throw "unreachable";
+        }
+        const [first, edge] = edge_;
+        if (first) {
+            frontier.push([false, edge]);
+            if (edge instanceof HTMLInputElement) {
+                inputCounts[inputCounts.length - 1] += 1;
+            } else if (edge instanceof ShadowRoot) {
+                inputCounts.push(0);
+            }
+            for (const child of edge.children) {
+                frontier.push([true, /** @type {HTMLElement} */(child)]);
+            }
+            /** @type {ShadowRoot?} */
+            const shadowDom = edge?.openOrClosedShadowRoot || browser?.dom?.openOrClosedShadowRoot?.(edge);
+            if (shadowDom != null) {
+                frontier.push([true, shadowDom]);
+            }
+        } else {
+            if (edge instanceof ShadowRoot) {
+                const inputCount = inputCounts.pop();
+                if (inputCount == null) {
+                    throw "assertion";
+                }
+                if (inputCount > 0) {
+                    doms.push(edge);
+                }
+            }
+        }
+    }
+};
+
 // From browserpass (nearly verbatim)
 // ============================================================================
 
 /**
  * 
- * @param {Document|Element} parent Element to search under
+ * @param {(Document|DocumentFragment|Element)[]} parents Elements to search under
  * @param {string[]} selectors List of input elem selectors
  * @param {string[]?} allowedInputTypes Allowed type= for input elements
- * @returns 
+ * @returns {HTMLInputElement[]}
  */
-const queryAllVisible = (parent, selectors, allowedInputTypes) => {
+const queryAllVisible = (parents, selectors, allowedInputTypes) => {
     const result = [];
     for (const sel of selectors) {
-        for (const elem0 of parent.querySelectorAll(sel)) {
-            const elem = /** @type {HTMLInputElement} */ (elem0);
+        for (const parent of parents) {
+            for (const elem0 of parent.querySelectorAll(sel)) {
+                const elem = /** @type {HTMLInputElement} */ (elem0);
 
-            // Ignore disabled fields
-            if (elem.disabled) {
-                continue;
-            }
-            // Elem or its parent has a style 'display: none',
-            // or it is just too narrow to be a real field (a trap for spammers?).
-            if (elem.offsetWidth < 30 || elem.offsetHeight < 10) {
-                continue;
-            }
-            // We may have a whitelist of acceptable field types. If so, skip elements of a different type.
-            if (allowedInputTypes && allowedInputTypes.indexOf(elem.type.toLowerCase()) < 0) {
-                continue;
-            }
-            // Elem takes space on the screen, but it or its parent is hidden with a visibility style.
-            let style = window.getComputedStyle(elem);
-            if (style.visibility == "hidden") {
-                continue;
-            }
-            // Elem is outside of the boundaries of the visible viewport.
-            let rect = elem.getBoundingClientRect();
-            if (
-                rect.x + rect.width < 0 ||
-                rect.y + rect.height < 0 ||
-                rect.x > window.innerWidth ||
-                rect.y > window.innerHeight
-            ) {
-                continue;
-            }
-            // Elem is hidden by its or or its parent's opacity rules
-            const OPACITY_LIMIT = 0.1;
-            let opacity = 1;
-            for (
-                let testElem = /** @type {HTMLElement} */ (elem);
-                opacity >= OPACITY_LIMIT && testElem && testElem.nodeType === Node.ELEMENT_NODE;
-                testElem = testElem.parentElement
-            ) {
-                let style = window.getComputedStyle(testElem);
-                if (style.opacity) {
-                    opacity *= parseFloat(style.opacity);
+                // Ignore disabled fields
+                if (elem.disabled) {
+                    continue;
                 }
+                // Elem or its parent has a style 'display: none',
+                // or it is just too narrow to be a real field (a trap for spammers?).
+                if (elem.offsetWidth < 30 || elem.offsetHeight < 10) {
+                    continue;
+                }
+                // We may have a whitelist of acceptable field types. If so, skip elements of a different type.
+                if (allowedInputTypes && allowedInputTypes.indexOf(elem.type.toLowerCase()) < 0) {
+                    continue;
+                }
+                // Elem takes space on the screen, but it or its parent is hidden with a visibility style.
+                let style = window.getComputedStyle(elem);
+                if (style.visibility == "hidden") {
+                    continue;
+                }
+                // Elem is outside of the boundaries of the visible viewport.
+                let rect = elem.getBoundingClientRect();
+                if (
+                    rect.x + rect.width < 0 ||
+                    rect.y + rect.height < 0 ||
+                    rect.x > window.innerWidth ||
+                    rect.y > window.innerHeight
+                ) {
+                    continue;
+                }
+                // Elem is hidden by its or or its parent's opacity rules
+                const OPACITY_LIMIT = 0.1;
+                let opacity = 1;
+                for (
+                    let testElem = /** @type {HTMLElement?} */ (elem);
+                    opacity >= OPACITY_LIMIT && testElem && testElem.nodeType === Node.ELEMENT_NODE;
+                    testElem = testElem.parentElement
+                ) {
+                    let style = window.getComputedStyle(testElem);
+                    if (style.opacity) {
+                        opacity *= parseFloat(style.opacity);
+                    }
+                }
+                if (opacity < OPACITY_LIMIT) {
+                    continue;
+                }
+                // This element is visible, will use it.
+                result.push(elem);
             }
-            if (opacity < OPACITY_LIMIT) {
-                continue;
-            }
-            // This element is visible, will use it.
-            result.push(elem);
         }
     }
     return result;
@@ -138,6 +201,7 @@ const setInputValue = (el0, value) => {
 
 browser.runtime.onMessage.addListener((message0, _, responder) => {
     try {
+        refreshAllDoms();
         const message = /** @type {Message} */(message0);
         switch (message.type) {
             case "fill_user_password":
@@ -181,7 +245,7 @@ browser.runtime.onMessage.addListener((message0, _, responder) => {
                 const passwordSels = ["input[type=password i][autocomplete=current-password i]", "input[type=password i]"];
 
                 /** @type {HTMLInputElement?} */
-                let userInput;
+                let userInput = null;
                 /** @type {HTMLInputElement?} */
                 let passwordInput;
                 SELECTED_INPUTS: do {
@@ -191,33 +255,37 @@ browser.runtime.onMessage.addListener((message0, _, responder) => {
                     SELECTED_FORM: do {
 
                         const classifiedForms =
-                            /** @type { Map<boolean, Map<boolean, FormInfo[]>> } */
+                            /** @type { Map<HasForm, Map<HasFormMark, Map<HasPassword, FormInfo[]>>> } */
                             (new Map());
 
                         // Find and classify forms by likelihood to be a login form (form markers, has password element, etc)
                         //
                         // Start with passwords because I think those are less ambiguously labeled.
-                        const anchorElementsPwFirst = queryAllVisible(document, passwordSels, null).map(s =>
+                        const anchorElementsPwFirst = queryAllVisible(doms, passwordSels, null).map(s =>
                             /** @type {["user"|"password", HTMLInputElement]} */
                             (["password", s])
                         ).concat(
-                            queryAllVisible(document, userSels, userAllowedInputTypes).map(
+                            queryAllVisible(doms, userSels, userAllowedInputTypes).map(
                                 s =>
                                     /** @type {["user"|"password", HTMLInputElement]} */
                                     (["user", s])
                             ));
                         const seenForms = new Set();
                         for (const [selType, anchorElement] of anchorElementsPwFirst) {
-                            const form = anchorElement.form;
-                            if (!form) {
-                                continue;
-                            }
+                            let form = anchorElement.form;
                             if (seenForms.has(form)) {
                                 continue;
                             }
                             seenForms.add(form);
 
-                            const hasMark = (() => {
+                            /** @type {HasForm} */
+                            const hasForm = form != null;
+
+                            /** @type {HasFormMark} */
+                            const formHasMark = (() => {
+                                if (form == null) {
+                                    return false;
+                                }
                                 for (const attr in ["id", "name", "class", "action"]) {
                                     for (const wantValue in [
                                         "login",
@@ -246,15 +314,21 @@ browser.runtime.onMessage.addListener((message0, _, responder) => {
                                     if (anchorElement.type == "password") {
                                         return anchorElement;
                                     }
-                                    for (const sel of passwordSels) {
-                                        const found = form.querySelectorAll(sel)[Symbol.iterator]().next().value;
-                                        if (found) {
-                                            return /** @type {HTMLInputElement} */ (found);
+                                    var parents;
+                                    if (form !== null) {
+                                        parents = [form];
+                                    } else {
+                                        parents = doms;
+                                    }
+                                    for (const found of queryAllVisible(parents, passwordSels, null)) {
+                                        if ((found.form == null) != (form == null)) {
+                                            continue;
                                         }
+                                        return found;
                                     }
                                     return null;
                                 })();
-                            const hasPassword = !!passwordInput0;
+                            const hasPassword = /** @type {HasPassword} */ (!!passwordInput0);
 
                             const candidateForm = {
                                 form: form,
@@ -264,7 +338,7 @@ browser.runtime.onMessage.addListener((message0, _, responder) => {
                             };
 
                             // Short-circuit search for (near-)perfect matches
-                            if (hasMark && hasPassword) {
+                            if (formHasMark && hasPassword) {
                                 if (selType == "user") {
                                     // Perfect match, exit search
                                     userInput = anchorElement;
@@ -277,48 +351,41 @@ browser.runtime.onMessage.addListener((message0, _, responder) => {
                                 }
                             }
 
-                            // Oof... https://github.com/microsoft/TypeScript/issues/27387
-                            /** @type {Map<boolean, FormInfo[]>} */
-                            var classifiedForms1;
-                            if (classifiedForms.has(hasMark)) {
-                                classifiedForms1 = classifiedForms.get(hasMark);
-                            } else {
-                                classifiedForms1 = new Map();
-                                classifiedForms.set(hasMark, classifiedForms1);
-                            }
-                            /** @type {FormInfo[]} */
-                            var classifiedForms2;
-                            if (classifiedForms1.has(hasPassword)) {
-                                classifiedForms2 = classifiedForms1.get(hasPassword);
-                            } else {
-                                classifiedForms2 = [];
-                                classifiedForms1.set(hasPassword, classifiedForms2);
-                            }
-                            classifiedForms2.push(candidateForm);
+                            mapGetOrInsert(
+                                mapGetOrInsert(
+                                    mapGetOrInsert(
+                                        classifiedForms,
+                                        hasForm,
+                                        () => /** @type {Map<HasFormMark, Map<HasPassword, FormInfo[]>>} */(new Map()),
+                                    ),
+                                    formHasMark,
+                                    () => /** @type {Map<HasPassword, FormInfo[]>} */ new Map(),
+                                ),
+                                hasPassword,
+                                () => /** @type {FormInfo[]} */[],
+                            ).push(candidateForm)
                         }
 
                         // Select the best form by criteria
-                        for (const wantMark of [true, false]) {
-                            for (const wantPassword of [true, false]) {
-                                /** @type {Map<boolean, FormInfo[]>} */
-                                var classifiedForms1;
-                                if (classifiedForms.has(wantMark)) {
-                                    classifiedForms1 = classifiedForms.get(wantMark);
-                                } else {
-                                    classifiedForms1 = new Map();
-                                    classifiedForms.set(wantMark, classifiedForms1);
-                                }
-                                /** @type {FormInfo[]} */
-                                var classifiedForms2;
-                                if (classifiedForms1.has(wantPassword)) {
-                                    classifiedForms2 = classifiedForms1.get(wantPassword);
-                                } else {
-                                    classifiedForms2 = [];
-                                    classifiedForms1.set(wantPassword, classifiedForms2);
-                                }
-                                for (const formInfo of classifiedForms2) {
-                                    selectedForm = formInfo;
-                                    break SELECTED_FORM;
+                        for (const wantForm of [true, false]) {
+                            for (const wantFormMark of [true, false]) {
+                                for (const wantPassword of [true, false]) {
+                                    for (const formInfo of mapGetOrInsert(
+                                        mapGetOrInsert(
+                                            mapGetOrInsert(
+                                                classifiedForms,
+                                                wantForm,
+                                                () => new Map(),
+                                            ),
+                                            wantFormMark,
+                                            () => new Map(),
+                                        ),
+                                        wantPassword,
+                                        () => [],
+                                    )) {
+                                        selectedForm = formInfo;
+                                        break SELECTED_FORM;
+                                    }
                                 }
                             }
                         }
@@ -334,11 +401,21 @@ browser.runtime.onMessage.addListener((message0, _, responder) => {
                     if (selectedForm.searchedForUser) {
                         userInput = selectedForm.userInput;
                     } else {
-                        for (const found of queryAllVisible(selectedForm.form, userSels, userAllowedInputTypes)) {
+                        var parents;
+                        if (selectedForm.form !== null) {
+                            parents = [selectedForm.form];
+                        } else {
+                            parents = doms;
+                        }
+                        for (const found of queryAllVisible(parents, userSels, userAllowedInputTypes)) {
+                            if ((found.form == null) != (selectedForm.form == null)) {
+                                continue;
+                            }
                             if (found == passwordInput) {
                                 continue;
                             }
                             userInput = found;
+                            break;
                         }
                     }
 
