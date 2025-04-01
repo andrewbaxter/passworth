@@ -28,8 +28,6 @@ rust.naersk.buildPackage {
   release = false;
   nativeBuildInputs = [
     pkgs.pkg-config
-    pkgs.cargo
-    pkgs.rustc
     pkgs.rustPlatform.bindgenHook
     pkgs.llvmPackages.libclang
     pkgs.makeWrapper
