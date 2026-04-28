@@ -8,3 +8,6 @@ publish = false
 glove = { version = "0.4", features = ["unix"] }
 passworth = { path = "../shared" }
 loga = "0.5"
+
+[lints.clippy]
+all = "allow"

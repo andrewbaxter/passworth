@@ -55,3 +55,6 @@ gtk4-layer-shell = "0.5"
 
 [build-dependencies]
 good-ormning = { version = "0.3", features = ["sqlite", "chrono"] }
+
+[lints.clippy]
+all = "allow"

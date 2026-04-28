@@ -16,9 +16,11 @@ let
     src = pkgs.fetchFromGitHub {
       owner = "wmww";
       repo = "gtk4-layer-shell";
-      # https://github.com/wmww/gtk4-layer-shell/pull/82
-      rev = "a62b7d38e568b91c4163dfb7c0836ad76ff1821d";
-      hash = "sha256-/afdFiNs8bQNUJ1B4Xefk8hOcxBTbBJaYLxZ39BuvXg=";
+      # related, 86?
+      rev = "1c963c51514581c41b9bdae08cdf69171265cdda";
+      #hash = "sha256-/afdFiNs8bQNUJ1B4Xefk8hOcxBTbBJaYLxZ39BuvXg=";
+      # Changed?
+      hash = "sha256-2OZsLUUsWVk5oh5Y/UFjTqzcM+u2NSPG/YS7uT3iRfc=";
     };
   });
 in

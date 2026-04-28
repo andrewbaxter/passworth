@@ -35,3 +35,6 @@ flowcontrol = "0.2"
 http = "1"
 glove = { version = "0.4" }
 reqwest = "0.12.12"
+
+[lints.clippy]
+all = "allow"
