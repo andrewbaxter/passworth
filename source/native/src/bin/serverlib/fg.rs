@@ -152,9 +152,26 @@ async fn do_form_dialog<
         w
     };
     layout.append(body);
+    let buttons = hbox();
+    layout.append(&buttons);
+    let cancel = gtk4::Button::builder().label("Cancel").halign(gtk4::Align::End).build();
+    cancel.connect_clicked(|button| {
+        let Some(root) = button.root() else {
+            return;
+        };
+        if let Ok(window) = root.downcast::<gtk4::Window>() {
+            window.close();
+        }
+    });
+    buttons.append(&cancel);
     let submit =
-        gtk4::Button::builder().label("Ok").halign(gtk4::Align::End).css_classes(["suggested-action"]).build();
-    layout.append(&submit);
+        gtk4::Button::builder()
+            .label("Ok")
+            .hexpand(true)
+            .halign(gtk4::Align::End)
+            .css_classes(["suggested-action"])
+            .build();
+    buttons.append(&submit);
     submit.set_receives_default(true);
     submit.connect_clicked({
         let res_tx = RefCell::new(Some(res_tx));
@@ -172,6 +189,7 @@ async fn do_form_dialog<
     });
     if let Some(mut order) = tab_order {
         // No sane way to set tab order...
+        order.push(cancel.clone().into());
         order.push(submit.clone().into());
         layout.connect_realize(move |w| {
             let order = order.clone();
@@ -588,13 +606,13 @@ async fn ui_window(app: &Application, title: Title, body: &impl gtk4::glib::obje
     window.init_layer_shell();
     window.set_layer(gtk4_layer_shell::Layer::Overlay);
     window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::Exclusive);
-    window.connect_destroy({
+    window.connect_close_request({
         let close_tx = RefCell::new(Some(close_tx));
         move |_| {
-            let Some(close_tx) = close_tx.borrow_mut().take() else {
-                return;
-            };
-            close_tx.send(()).ignore();
+            if let Some(close_tx) = close_tx.borrow_mut().take() {
+                close_tx.send(()).ignore();
+            }
+            gtk4::glib::Propagation::Proceed
         }
     });
     let display = RootExt::display(&window);
