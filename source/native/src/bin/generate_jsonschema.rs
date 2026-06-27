@@ -1,7 +1,5 @@
 use {
-    passworth_native::{
-        config::Config,
-    },
+    passworth_native::config::Config,
     schemars::schema_for,
     std::{
         env,

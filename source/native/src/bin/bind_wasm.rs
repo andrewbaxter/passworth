@@ -1,7 +1,7 @@
 use {
     aargvark::{
-        vark,
         Aargvark,
+        vark,
     },
     std::path::PathBuf,
     wasm_bindgen_cli_support::Bindgen,
@@ -11,10 +11,10 @@ use {
 struct Args {
     #[vark(flag = "--in-wasm")]
     in_wasm: PathBuf,
-    #[vark(flag = "--out-name")]
-    out_name: String,
     #[vark(flag = "--out-dir")]
     out_dir: PathBuf,
+    #[vark(flag = "--out-name")]
+    out_name: String,
 }
 
 fn main() {

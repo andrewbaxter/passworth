@@ -1,8 +1,4 @@
 use {
-    super::{
-        dbutil::open_privdb,
-        privdb,
-    },
     crate::{
         FactorTree,
         FactorTreeVariant,
@@ -12,11 +8,14 @@ use {
         superif,
     },
     gtk4::{
+        Align,
+        Application,
+        Label,
         gdk::{
-            prelude::DisplayExt,
             Key,
             ModifierType,
             Monitor,
+            prelude::DisplayExt,
         },
         gio::prelude::ListModelExt,
         glib::object::Cast,
@@ -31,26 +30,23 @@ use {
             RootExt,
             WidgetExt,
         },
-        Align,
-        Application,
-        Label,
     },
     gtk4_layer_shell::LayerShell,
     loga::{
-        conversion::ResultIgnore,
-        ea,
         Log,
         ResultContext,
+        conversion::ResultIgnore,
+        ea,
     },
     openpgp_card_sequoia::state::Open,
     passworth_native::{
         config::latest::ConfigCredSmartcards,
         crypto::{
-            self,
+            CardStream,
             get_card_pubkey,
             local_decrypt,
             local_encrypt,
-            CardStream,
+            self,
         },
         error::{
             FromAnyErr,
@@ -58,14 +54,14 @@ use {
             UiErr,
         },
         generate::{
-            self,
-            bip39,
             BIP39_PHRASELEN,
+            bip39,
+            self,
         },
     },
     rand::{
-        rng,
         RngCore,
+        rng,
     },
     rusqlite::Connection,
     sequoia_openpgp::serialize::stream::{
@@ -75,13 +71,11 @@ use {
         Recipient,
     },
     std::{
-        cell::{
-            RefCell,
-        },
+        cell::RefCell,
         collections::{
-            hash_map::Entry,
             HashMap,
             HashSet,
+            hash_map::Entry,
         },
         future::Future,
         io::Write,
@@ -96,6 +90,10 @@ use {
             Instant,
         },
     },
+    super::{
+        dbutil::open_privdb,
+        privdb,
+    },
     tokio::{
         select,
         sync::{
@@ -104,6 +102,10 @@ use {
         },
     },
 };
+
+const SPACING1: i32 = 8;
+const SPACING2H: i32 = 16;
+const SPACING2V: i32 = 8;
 
 fn add_shortcut(w: &impl gtk4::glib::object::IsA<gtk4::Widget>, keys: &[Key], f: impl 'static + Clone + Fn()) {
     let shortcut = gtk4::ShortcutController::new();
@@ -125,453 +127,6 @@ fn add_shortcut(w: &impl gtk4::glib::object::IsA<gtk4::Widget>, keys: &[Key], f:
     w.add_controller(shortcut);
 }
 
-pub struct FgState {
-    pub log: Log,
-    pub last_prompts: Mutex<HashMap<usize, Instant>>,
-}
-
-async fn do_form_dialog<
-    T: 'static,
->(
-    app: &Application,
-    mut initial_warning: Option<String>,
-    title: Title,
-    body: &impl gtk4::glib::object::IsA<gtk4::Widget>,
-    tab_order: Option<Vec<gtk4::Widget>>,
-    f: impl Fn() -> Result<T, String> + 'static,
-) -> Option<T> {
-    let (res_tx, res_rx) = oneshot::channel();
-    let layout = vbox();
-    let warning = {
-        let w = label(&initial_warning.take().unwrap_or_default());
-        w.add_css_class("error");
-        if w.label().as_str().is_empty() {
-            w.set_visible(false);
-        }
-        layout.append(&w);
-        w
-    };
-    layout.append(body);
-    let buttons = hbox();
-    layout.append(&buttons);
-    let cancel = gtk4::Button::builder().label("Cancel").halign(gtk4::Align::End).build();
-    cancel.connect_clicked(|button| {
-        let Some(root) = button.root() else {
-            return;
-        };
-        if let Ok(window) = root.downcast::<gtk4::Window>() {
-            window.close();
-        }
-    });
-    buttons.append(&cancel);
-    let submit =
-        gtk4::Button::builder()
-            .label("Ok")
-            .hexpand(true)
-            .halign(gtk4::Align::End)
-            .css_classes(["suggested-action"])
-            .build();
-    buttons.append(&submit);
-    submit.set_receives_default(true);
-    submit.connect_clicked({
-        let res_tx = RefCell::new(Some(res_tx));
-        move |_button| {
-            match f() {
-                Ok(r) => {
-                    res_tx.borrow_mut().take().unwrap().send(r).ignore();
-                },
-                Err(e) => {
-                    warning.set_label(&e);
-                    warning.set_visible(true);
-                },
-            }
-        }
-    });
-    if let Some(mut order) = tab_order {
-        // No sane way to set tab order...
-        order.push(cancel.clone().into());
-        order.push(submit.clone().into());
-        layout.connect_realize(move |w| {
-            let order = order.clone();
-            w.root().unwrap().connect_move_focus(move |root, direction| {
-                let mut at = 0i32;
-                if let Some(true_focus) = root.focus() {
-                    for (i, w) in order.iter().enumerate() {
-                        let i = i as i32;
-                        if true_focus.is_ancestor(w) {
-                            at = i;
-                            break;
-                        }
-                    }
-                }
-                let mut next = at + match direction {
-                    gtk4::DirectionType::TabForward => 1,
-                    gtk4::DirectionType::TabBackward => -1,
-                    gtk4::DirectionType::Up => -1,
-                    gtk4::DirectionType::Down => 1,
-                    gtk4::DirectionType::Left => -1,
-                    gtk4::DirectionType::Right => 1,
-                    _ => 1,
-                };
-                if next < 0 {
-                    next = order.len() as i32 + next;
-                }
-                if next >= order.len() as i32 {
-                    next -= order.len() as i32;
-                }
-                let next = &order[next as usize];
-                next.parent().unwrap().set_focus_child(Some(next));
-            });
-        });
-    }
-    {
-        // No sane way to set default actions...
-        let mut stack = vec![gtk4::Widget::from(layout.clone())];
-        while let Some(top) = stack.pop() {
-            if let Some(top) = top.downcast_ref::<gtk4::Entry>() {
-                top.connect_activate({
-                    let submit = submit.clone();
-                    move |_| {
-                        submit.emit_clicked();
-                    }
-                });
-            }
-            if let Some(top) = top.downcast_ref::<gtk4::PasswordEntry>() {
-                top.connect_activate({
-                    let submit = submit.clone();
-                    move |_| {
-                        submit.emit_clicked();
-                    }
-                });
-            }
-            let mut next = top.first_child();
-            while let Some(at) = next {
-                stack.push(at.clone());
-                next = at.next_sibling();
-            }
-        }
-    }
-    return select!{
-        _ = ui_window(&app, title, &layout) => None,
-        r = res_rx => r.ok(),
-    };
-}
-
-fn gen_token() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.resize(32, 0u8);
-    rng().fill_bytes(&mut out);
-    return out;
-}
-
-async fn ui_recovery_entry(
-    app: &Application,
-    initial_warning: Option<String>,
-    title: Title,
-    message: &str,
-) -> Option<Vec<u8>> {
-    let layout = vbox();
-    layout.append(&label(message));
-    let word_set = Rc::new(bip39().iter().map(|x| *x).collect::<HashSet<_>>());
-    let form_layout = grid();
-    let mut entries = vec![];
-    let mut tab_order = vec![];
-    for i in 0 .. BIP39_PHRASELEN {
-        let base_col = 1 + (i as i32 / (BIP39_PHRASELEN / 2) as i32) * 2;
-        let row = 1 + i as i32 % (BIP39_PHRASELEN / 2) as i32;
-        form_layout.attach(&halign_end(label(&format!("{}.", i + 1))), base_col, row, 1, 1);
-        let entry = gtk4::Entry::builder().hexpand(true).build();
-        entry.connect_changed({
-            let word_set = word_set.clone();
-            move |entry| {
-                if word_set.contains(entry.text().as_str()) {
-                    entry.remove_css_class("error");
-                } else {
-                    entry.add_css_class("error");
-                }
-            }
-        });
-        form_layout.attach(&entry, base_col + 1, row, 1, 1);
-        entries.push(entry.clone());
-        tab_order.push(entry.into());
-    }
-    layout.append(&form_layout);
-    let Some(phrase) = do_form_dialog(&app, initial_warning, title, &layout, Some(tab_order), move || {
-        for entry in &entries {
-            if !word_set.contains(entry.text().as_str()) {
-                return Err("Some words are spelled incorrectly".to_string());
-            }
-        }
-        return Ok(
-            entries.iter().map(|x| x.text().to_string()).collect::<Vec<_>>().join(" ").as_bytes().to_vec(),
-        );
-    }).await else {
-        return None;
-    };
-    return Some(phrase);
-}
-
-async fn ui_choose(
-    app: &Application,
-    initial_warning: Option<String>,
-    title: Title,
-    choices: &Vec<Arc<FactorTree>>,
-) -> Option<Arc<FactorTree>> {
-    let (res_tx, mut res_rx) = mpsc::channel(1);
-    let layout = vbox();
-    attach_error(&layout, initial_warning);
-    layout.append(&label("Choose an unlock method."));
-    for (i, method) in choices.iter().enumerate() {
-        let button = gtk4::Button::builder().label(&method.desc).build();
-        if i == 0 {
-            button.add_css_class("suggested-action");
-        }
-        button.connect_clicked({
-            let method = method.clone();
-            let res_tx = res_tx.clone();
-            move |_| {
-                res_tx.try_send(method.clone()).unwrap();
-            }
-        });
-        layout.append(&button);
-    }
-    return select!{
-        _ = ui_window(&app, title, &layout) => None,
-        r = res_rx.recv() => r,
-    };
-}
-
-async fn ui_get_smartcard(
-    app: &Application,
-    card_stream: &mut CardStream,
-    initial_warning: Option<String>,
-    title: Title,
-    fingerprints: &[&str],
-) -> Option<openpgp_card_sequoia::Card<Open>> {
-    let layout = vbox();
-    attach_error(&layout, initial_warning);
-    layout.append(&label("Insert or swipe smartcard with GPG fingerprint:"));
-    for fingerprint in fingerprints {
-        layout.append(&monospace(&format!(" • {}", fingerprint)));
-    }
-    return select!{
-        _ = ui_window(&app, title, &layout) => None,
-        r = card_stream.next() => r,
-    };
-}
-
-async fn ui_unlock_smartcard(
-    log: &Log,
-    app: &Application,
-    initial_warning: Option<String>,
-    title: Title,
-    config: &ConfigCredSmartcards,
-    state: &HashMap<String, Vec<u8>>,
-) -> Result<Option<Vec<u8>>, UiErr> {
-    let mut card_stream = CardStream::new(&log);
-
-    // Try various cards
-    let mut warning = initial_warning;
-    loop {
-        match async {
-            // Pin entry
-            let pin = if !config.fixed_pin {
-                const KEYS: &[&[Key]] =
-                    &[
-                        &[Key::Arabic_0, Key::KP_0, Key::N, Key::B],
-                        &[Key::Arabic_1, Key::KP_1, Key::M, Key::X],
-                        &[Key::Arabic_2, Key::KP_2, Key::comma, Key::C],
-                        &[Key::Arabic_3, Key::KP_3, Key::period, Key::V],
-                        &[Key::Arabic_4, Key::KP_4, Key::J, Key::S],
-                        &[Key::Arabic_5, Key::KP_5, Key::K, Key::D],
-                        &[Key::Arabic_6, Key::KP_6, Key::L, Key::F],
-                        &[Key::Arabic_7, Key::KP_7, Key::U, Key::W],
-                        &[Key::Arabic_8, Key::KP_8, Key::I, Key::E],
-                        &[Key::Arabic_9, Key::KP_9, Key::O, Key::R],
-                    ];
-                let layout = vbox();
-                attach_error(&layout, warning.take());
-                layout.append(&label("Enter card PIN."));
-                let digits =
-                    gtk4::PasswordEntry::builder().hexpand(true).show_peek_icon(true).can_focus(false).build();
-                let pin_layout = grid();
-                for i in -1 .. 9 as i32 {
-                    let column = if i == -1 {
-                        0
-                    } else {
-                        i.rem_euclid(3)
-                    };
-                    let row = 3 - i.div_floor(3);
-                    let value = (i + 1) as usize;
-                    let button = gtk4::Button::builder().label(value.to_string()).can_focus(false).build();
-                    button.connect_clicked({
-                        let digits = digits.clone();
-                        move |_button| {
-                            digits.set_text(&format!("{}{}", digits.text().as_str(), value.to_string()));
-                        }
-                    });
-                    add_shortcut(&button, KEYS[value], {
-                        let button = button.clone();
-                        move || button.emit_clicked()
-                    });
-                    pin_layout.attach(&button, column, row, 1, 1);
-                }
-                {
-                    let button = gtk4::Button::builder().icon_name("edit-clear").can_focus(false).build();
-                    button.connect_clicked({
-                        let digits = digits.clone();
-                        move |_button| {
-                            digits.set_text("");
-                        }
-                    });
-                    add_shortcut(&button, &[Key::BackSpace, Key::Delete], {
-                        let button = button.clone();
-                        move || button.emit_clicked()
-                    });
-                    pin_layout.attach(&button, 1, 4, 1, 1);
-                }
-                layout.append(&halign_center(pin_layout));
-                layout.append(&digits);
-                let pin = match do_form_dialog(&app, warning.take(), title.clone(), &layout, None, {
-                    let digits = digits.clone();
-                    move || {
-                        return Ok(digits.text().to_string());
-                    }
-                }).await {
-                    Some(x) => x,
-                    None => {
-                        return Ok(None);
-                    },
-                };
-                Some(pin)
-            } else {
-                None
-            };
-            let card =
-                match ui_get_smartcard(
-                    app,
-                    &mut card_stream,
-                    warning.take(),
-                    title.clone(),
-                    &state.keys().map(|x: &String| x.as_str()).collect::<Vec<_>>(),
-                ).await {
-                    Some(c) => c,
-                    None => {
-                        return Ok(None);
-                    },
-                };
-            let (card, pubkey) = get_card_pubkey(card).await?;
-            let Some(card_config) =
-                config.smartcards.iter().filter(|c| c.fingerprint == pubkey.fingerprint().to_string()).next() else {
-                    return Ok(None);
-                };
-            let card = card.enter_pin(card_config.pin.clone().or(pin)).await?;
-            match card
-                .decrypt(
-                    state
-                        .get(&card_config.fingerprint)
-                        .context_with(
-                            "Missing stored state for smartcard with fingerprint",
-                            ea!(fingerprint = card_config.fingerprint),
-                        )?
-                        .clone(),
-                )
-                .await? {
-                crypto::MaybeNeedTouch::NeedTouch(card) => {
-                    let layout = vbox();
-                    if let Some(warning) = warning.take() {
-                        layout.append(&label(&warning));
-                    }
-                    layout.append(
-                        &label(&format!("Confirm the action on the smartcard {}", card_config.fingerprint)),
-                    );
-                    return select!{
-                        _ = ui_window(&app, title.clone(), &layout) => Ok(None),
-                        r = card.wait_for_touch() => {
-                            let (_, decrypted) = r?;
-                            Ok(Some(decrypted))
-                        },
-                    };
-                },
-                crypto::MaybeNeedTouch::Decryptor(_, decrypted) => {
-                    return Ok(Some(decrypted));
-                },
-            }
-        }.await {
-            Ok(r) => return Ok(r),
-            Err(e) => match e {
-                UiErr::Internal(i) => {
-                    log.log_err(loga::WARN, i);
-                    warning = Some("Internal error, check logs for details.".to_string());
-                    continue;
-                },
-                UiErr::External(e, i) => {
-                    if let Some(i) = i {
-                        log.log_err(loga::WARN, i);
-                    }
-                    warning = Some(e);
-                    continue;
-                },
-                UiErr::InternalUnresolvable(e) => {
-                    return Err(UiErr::InternalUnresolvable(e));
-                },
-            },
-        }
-    }
-}
-
-#[derive(Clone)]
-enum Either {
-    /// New, optionally old - old is only used for unlocking via old creds when
-    /// replacing stateful factors (namely or and smartcard which use stored encrypted
-    /// generated keys).
-    New(Arc<FactorTree>, Option<Arc<FactorTree>>),
-    Prev(Arc<FactorTree>),
-}
-
-const SPACING1: i32 = 8;
-const SPACING2H: i32 = 16;
-const SPACING2V: i32 = 8;
-
-fn vbox() -> gtk4::Box {
-    return gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).spacing(SPACING1).build();
-}
-
-fn hbox() -> gtk4::Box {
-    return gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(SPACING1).build();
-}
-
-fn grid() -> gtk4::Grid {
-    return gtk4::Grid::builder()
-        .row_spacing(SPACING1)
-        .column_spacing(SPACING1)
-        .row_homogeneous(true)
-        .hexpand(true)
-        .build();
-}
-
-struct DoCredsRes {
-    prev_tokens: HashMap<String, Vec<u8>>,
-    new_tokens: HashMap<String, Vec<u8>>,
-    store_state: HashMap<String, Vec<u8>>,
-}
-
-fn label(text: &str) -> Label {
-    return Label::builder()
-        .label(text)
-        .wrap(true)
-        .wrap_mode(gtk4::pango::WrapMode::Word)
-        .halign(Align::Start)
-        .build();
-}
-
-fn monospace(text: &str) -> Label {
-    let out = label(text);
-    out.set_wrap(false);
-    out.add_css_class("monospace");
-    return out;
-}
-
 fn attach_error(layout: &gtk4::Box, error: Option<String>) {
     if let Some(t) = error {
         let l = label(&t);
@@ -580,126 +135,41 @@ fn attach_error(layout: &gtk4::Box, error: Option<String>) {
     }
 }
 
-fn halign_start<T: gtk4::glib::object::IsA<gtk4::Widget>>(w: T) -> T {
-    w.set_halign(Align::Start);
-    return w;
+pub enum B2F {
+    Initialize(B2FInitialize, oneshot::Sender<Result<Option<B2FInitializeResult>, loga::Error>>),
+    Prompt(B2FPrompt, oneshot::Sender<Result<Option<bool>, loga::Error>>),
+    Unlock(B2FUnlock, oneshot::Sender<Result<Option<B2FUnlockResult>, loga::Error>>),
 }
 
-fn halign_center<T: gtk4::glib::object::IsA<gtk4::Widget>>(w: T) -> T {
-    w.set_halign(Align::Center);
-    return w;
+pub struct B2FInitialize {
+    pub prev_root_factor: Option<Arc<FactorTree>>,
+    pub prev_state: HashMap<String, Vec<u8>>,
+    pub prev_tokens: HashMap<String, Vec<u8>>,
+    pub privdbc: Option<Connection>,
+    pub root_factor: Arc<FactorTree>,
+    pub state_changed: HashSet<String>,
+    pub tokens_changed: HashSet<String>,
 }
 
-fn halign_end<T: gtk4::glib::object::IsA<gtk4::Widget>>(w: T) -> T {
-    w.set_halign(Align::End);
-    return w;
+pub struct B2FInitializeResult {
+    pub root_token: Option<String>,
+    pub store_state: HashMap<String, Vec<u8>>,
 }
 
-/// Exits when manually closed. Closes window when dropped.
-async fn ui_window(app: &Application, title: Title, body: &impl gtk4::glib::object::IsA<gtk4::Widget>) {
-    let (close_tx, close_rx) = oneshot::channel();
-    let window = gtk4::ApplicationWindow::builder().application(app).title(&format!("Passworth - {}", match title {
-        Title::Initialize(x) => format!("Initialize [{}]", x),
-        Title::Unlock(x) => format!("Unlock [{}]", x),
-        Title::Prompt(x) => format!("Prompt [{}]", x),
-    })).resizable(false).build();
-    window.init_layer_shell();
-    window.set_layer(gtk4_layer_shell::Layer::Overlay);
-    window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::Exclusive);
-    window.connect_close_request({
-        let close_tx = RefCell::new(Some(close_tx));
-        move |_| {
-            if let Some(close_tx) = close_tx.borrow_mut().take() {
-                close_tx.send(()).ignore();
-            }
-            gtk4::glib::Propagation::Proceed
-        }
-    });
-    let display = RootExt::display(&window);
-    let wrap = vbox();
-    wrap.set_margin_bottom(SPACING2V);
-    wrap.set_margin_top(SPACING2V);
-    wrap.set_margin_start(SPACING2H);
-    wrap.set_margin_end(SPACING2H);
-    wrap.set_halign(Align::Center);
-    wrap.set_valign(Align::Center);
-    wrap.append(body);
-    window.set_child(Some(&wrap));
-    add_shortcut(&window, &[Key::Escape], {
-        let window = window.clone();
-        move || window.close()
-    });
-    window.present();
-    {
-        let monitors = display.monitors();
-        monitors.connect_items_changed({
-            let window = window.clone();
-            let last_monitor = RefCell::new(window.monitor());
-            move |list, position, removed_count, _added_count| {
-                for i in position .. position + removed_count {
-                    if *last_monitor.borrow() == list.item(i).map(|x| x.dynamic_cast::<Monitor>().unwrap()) {
-                        *last_monitor.borrow_mut() = None;
-                    }
-                }
-                if last_monitor.borrow().is_none() {
-                    superif!({
-                        for i in 0 .. position {
-                            break 'found list.item(i).unwrap().dynamic_cast::<Monitor>().unwrap();
-                        }
-                        for i in position .. list.n_items() {
-                            break 'found list.item(i).unwrap().dynamic_cast::<Monitor>().unwrap();
-                        }
-                    } m = 'found {
-                        window.set_monitor(Some(&m));
-                        *last_monitor.borrow_mut() = Some(m);
-                    });
-                }
-            }
-        });
-    }
-    let _defer = defer::defer(move || {
-        window.close();
-    });
-    close_rx.await.ignore();
+pub struct B2FPrompt {
+    pub prompt_rules: HashMap<usize, (String, u64)>,
 }
 
-#[derive(Clone)]
-enum Title {
-    Initialize(String),
-    Unlock(String),
-    Prompt(String),
+pub struct B2FUnlock {
+    pub privdb_path: PathBuf,
+    pub root_factor: Arc<FactorTree>,
+    pub state: HashMap<String, Vec<u8>>,
 }
 
-/// Retry ui interaction as long as there are errors. `Ok(None)` aborts.
-async fn ui_loop<
-    T,
-    F: Future<Output = Result<Option<T>, UiErr>>,
-    N: FnMut(Application, Option<String>) -> F,
->(log: &loga::Log, app: &Application, mut f: N) -> Result<Option<T>, loga::Error> {
-    let mut show_error = None;
-    loop {
-        match f(app.clone(), show_error.take()).await {
-            Ok(r) => return Ok(r),
-            Err(e) => match e {
-                UiErr::External(e, e_internal) => {
-                    if let Some(e_internal) = e_internal {
-                        log.log_err(loga::WARN, e_internal);
-                    };
-                    show_error = Some(e);
-                },
-                UiErr::Internal(e) => {
-                    log.log_err(
-                        loga::WARN,
-                        e.context("An unexpected issue occurred while unlocking/initializing unlock credentials."),
-                    );
-                    show_error = Some("An unexpected error occurred, see log for details.".to_string());
-                },
-                UiErr::InternalUnresolvable(e) => {
-                    return Err(e);
-                },
-            },
-        }
-    };
+pub struct B2FUnlockResult {
+    pub privdbc: Connection,
+    pub root_token: String,
+    pub tokens: HashMap<String, Vec<u8>>,
 }
 
 async fn do_creds(
@@ -1207,79 +677,131 @@ async fn do_creds(
     }));
 }
 
-pub struct B2FUnlock {
-    pub privdb_path: PathBuf,
-    pub root_factor: Arc<FactorTree>,
-    pub state: HashMap<String, Vec<u8>>,
-}
-
-pub struct B2FUnlockResult {
-    pub privdbc: Connection,
-    pub root_token: String,
-    pub tokens: HashMap<String, Vec<u8>>,
-}
-
-pub async fn do_unlock(
-    state: Arc<FgState>,
+async fn do_form_dialog<
+    T: 'static,
+>(
     app: &Application,
-    args: Arc<B2FUnlock>,
-) -> Result<Option<B2FUnlockResult>, loga::Error> {
-    return ui_loop(&state.log.clone(), app, move |app, show_err| {
-        let args = args.clone();
-        let state = state.clone();
-        async move {
-            let res =
-                match do_creds(
-                    app,
-                    state,
-                    HashSet::new(),
-                    HashSet::new(),
-                    HashMap::new(),
-                    args.state.clone(),
-                    show_err,
-                    Either::Prev(args.root_factor.clone()),
-                ).await? {
-                    Some(x) => Arc::new(x),
-                    None => return Ok(None),
-                };
-            let privdbc = gtk4::gio::spawn_blocking({
-                let args = args.clone();
-                let res = res.clone();
-                move || {
-                    // Confirm token
-                    let mut privdbc =
-                        open_privdb(
-                            &args.privdb_path,
-                            &zbase32::encode_full_bytes(&res.prev_tokens.get(&args.root_factor.id).unwrap()),
-                        )?;
-                    privdb::migrate(
-                        &mut privdbc,
-                    ).context_with("Error setting up priv database", ea!(path = args.privdb_path.to_string_lossy()))?;
-                    return Ok(privdbc) as Result<_, loga::Error>;
-                }
-            }).await.any_context()?.to_ui_err_external("Failed to unlock database")?;
-            return Ok(Some(B2FUnlockResult {
-                privdbc: privdbc,
-                root_token: zbase32::encode_full_bytes(&res.prev_tokens.get(&args.root_factor.id).unwrap().clone()),
-                tokens: res.prev_tokens.clone(),
-            }));
+    mut initial_warning: Option<String>,
+    title: Title,
+    body: &impl gtk4::glib::object::IsA<gtk4::Widget>,
+    tab_order: Option<Vec<gtk4::Widget>>,
+    f: impl Fn() -> Result<T, String> + 'static,
+) -> Option<T> {
+    let (res_tx, res_rx) = oneshot::channel();
+    let layout = vbox();
+    let warning = {
+        let w = label(&initial_warning.take().unwrap_or_default());
+        w.add_css_class("error");
+        if w.label().as_str().is_empty() {
+            w.set_visible(false);
         }
-    }).await;
-}
-
-pub struct B2FInitialize {
-    pub privdbc: Option<Connection>,
-    pub root_factor: Arc<FactorTree>,
-    pub tokens_changed: HashSet<String>,
-    pub state_changed: HashSet<String>,
-    pub prev_tokens: HashMap<String, Vec<u8>>,
-    pub prev_root_factor: Option<Arc<FactorTree>>,
-    pub prev_state: HashMap<String, Vec<u8>>,
-}
-
-pub struct B2FInitializeResult {
-    pub root_token: Option<String>,
-    pub store_state: HashMap<String, Vec<u8>>,
+        layout.append(&w);
+        w
+    };
+    layout.append(body);
+    let buttons = hbox();
+    layout.append(&buttons);
+    let cancel = gtk4::Button::builder().label("Cancel").halign(gtk4::Align::End).build();
+    cancel.connect_clicked(|button| {
+        let Some(root) = button.root() else {
+            return;
+        };
+        if let Ok(window) = root.downcast::<gtk4::Window>() {
+            window.close();
+        }
+    });
+    buttons.append(&cancel);
+    let submit =
+        gtk4::Button::builder()
+            .label("Ok")
+            .hexpand(true)
+            .halign(gtk4::Align::End)
+            .css_classes(["suggested-action"])
+            .build();
+    buttons.append(&submit);
+    submit.set_receives_default(true);
+    submit.connect_clicked({
+        let res_tx = RefCell::new(Some(res_tx));
+        move |_button| {
+            match f() {
+                Ok(r) => {
+                    res_tx.borrow_mut().take().unwrap().send(r).ignore();
+                },
+                Err(e) => {
+                    warning.set_label(&e);
+                    warning.set_visible(true);
+                },
+            }
+        }
+    });
+    if let Some(mut order) = tab_order {
+        // No sane way to set tab order...
+        order.push(cancel.clone().into());
+        order.push(submit.clone().into());
+        layout.connect_realize(move |w| {
+            let order = order.clone();
+            w.root().unwrap().connect_move_focus(move |root, direction| {
+                let mut at = 0i32;
+                if let Some(true_focus) = root.focus() {
+                    for (i, w) in order.iter().enumerate() {
+                        let i = i as i32;
+                        if true_focus.is_ancestor(w) {
+                            at = i;
+                            break;
+                        }
+                    }
+                }
+                let mut next = at + match direction {
+                    gtk4::DirectionType::TabForward => 1,
+                    gtk4::DirectionType::TabBackward => -1,
+                    gtk4::DirectionType::Up => -1,
+                    gtk4::DirectionType::Down => 1,
+                    gtk4::DirectionType::Left => -1,
+                    gtk4::DirectionType::Right => 1,
+                    _ => 1,
+                };
+                if next < 0 {
+                    next = order.len() as i32 + next;
+                }
+                if next >= order.len() as i32 {
+                    next -= order.len() as i32;
+                }
+                let next = &order[next as usize];
+                next.parent().unwrap().set_focus_child(Some(next));
+            });
+        });
+    }
+    {
+        // No sane way to set default actions...
+        let mut stack = vec![gtk4::Widget::from(layout.clone())];
+        while let Some(top) = stack.pop() {
+            if let Some(top) = top.downcast_ref::<gtk4::Entry>() {
+                top.connect_activate({
+                    let submit = submit.clone();
+                    move |_| {
+                        submit.emit_clicked();
+                    }
+                });
+            }
+            if let Some(top) = top.downcast_ref::<gtk4::PasswordEntry>() {
+                top.connect_activate({
+                    let submit = submit.clone();
+                    move |_| {
+                        submit.emit_clicked();
+                    }
+                });
+            }
+            let mut next = top.first_child();
+            while let Some(at) = next {
+                stack.push(at.clone());
+                next = at.next_sibling();
+            }
+        }
+    }
+    return select!{
+        _ = ui_window(&app, title, &layout) => None,
+        r = res_rx => r.ok(),
+    };
 }
 
 pub async fn do_initialize(
@@ -1306,10 +828,6 @@ pub async fn do_initialize(
         root_token: r.new_tokens.get(&args.root_factor.id).map(|x| zbase32::encode_full_bytes(&x)),
         store_state: r.store_state,
     }));
-}
-
-pub struct B2FPrompt {
-    pub prompt_rules: HashMap<usize, (String, u64)>,
 }
 
 pub async fn do_prompt(
@@ -1384,8 +902,488 @@ pub async fn do_prompt(
     return Ok(out);
 }
 
-pub enum B2F {
-    Initialize(B2FInitialize, oneshot::Sender<Result<Option<B2FInitializeResult>, loga::Error>>),
-    Unlock(B2FUnlock, oneshot::Sender<Result<Option<B2FUnlockResult>, loga::Error>>),
-    Prompt(B2FPrompt, oneshot::Sender<Result<Option<bool>, loga::Error>>),
+pub async fn do_unlock(
+    state: Arc<FgState>,
+    app: &Application,
+    args: Arc<B2FUnlock>,
+) -> Result<Option<B2FUnlockResult>, loga::Error> {
+    return ui_loop(&state.log.clone(), app, move |app, show_err| {
+        let args = args.clone();
+        let state = state.clone();
+        async move {
+            let res =
+                match do_creds(
+                    app,
+                    state,
+                    HashSet::new(),
+                    HashSet::new(),
+                    HashMap::new(),
+                    args.state.clone(),
+                    show_err,
+                    Either::Prev(args.root_factor.clone()),
+                ).await? {
+                    Some(x) => Arc::new(x),
+                    None => return Ok(None),
+                };
+            let privdbc = gtk4::gio::spawn_blocking({
+                let args = args.clone();
+                let res = res.clone();
+                move || {
+                    // Confirm token
+                    let mut privdbc =
+                        open_privdb(
+                            &args.privdb_path,
+                            &zbase32::encode_full_bytes(&res.prev_tokens.get(&args.root_factor.id).unwrap()),
+                        )?;
+                    privdb::migrate(
+                        &mut privdbc,
+                    ).context_with("Error setting up priv database", ea!(path = args.privdb_path.to_string_lossy()))?;
+                    return Ok(privdbc) as Result<_, loga::Error>;
+                }
+            }).await.any_context()?.to_ui_err_external("Failed to unlock database")?;
+            return Ok(Some(B2FUnlockResult {
+                privdbc: privdbc,
+                root_token: zbase32::encode_full_bytes(&res.prev_tokens.get(&args.root_factor.id).unwrap().clone()),
+                tokens: res.prev_tokens.clone(),
+            }));
+        }
+    }).await;
+}
+
+struct DoCredsRes {
+    new_tokens: HashMap<String, Vec<u8>>,
+    prev_tokens: HashMap<String, Vec<u8>>,
+    store_state: HashMap<String, Vec<u8>>,
+}
+
+#[derive(Clone)]
+enum Either {
+    /// New, optionally old - old is only used for unlocking via old creds when
+    /// replacing stateful factors (namely or and smartcard which use stored encrypted
+    /// generated keys).
+    New(Arc<FactorTree>, Option<Arc<FactorTree>>),
+    Prev(Arc<FactorTree>),
+}
+
+pub struct FgState {
+    pub last_prompts: Mutex<HashMap<usize, Instant>>,
+    pub log: Log,
+}
+
+fn gen_token() -> Vec<u8> {
+    let mut out = Vec::new();
+    out.resize(32, 0u8);
+    rng().fill_bytes(&mut out);
+    return out;
+}
+
+fn grid() -> gtk4::Grid {
+    return gtk4::Grid::builder()
+        .row_spacing(SPACING1)
+        .column_spacing(SPACING1)
+        .row_homogeneous(true)
+        .hexpand(true)
+        .build();
+}
+
+fn halign_center<T: gtk4::glib::object::IsA<gtk4::Widget>>(w: T) -> T {
+    w.set_halign(Align::Center);
+    return w;
+}
+
+fn halign_end<T: gtk4::glib::object::IsA<gtk4::Widget>>(w: T) -> T {
+    w.set_halign(Align::End);
+    return w;
+}
+
+fn halign_start<T: gtk4::glib::object::IsA<gtk4::Widget>>(w: T) -> T {
+    w.set_halign(Align::Start);
+    return w;
+}
+
+fn hbox() -> gtk4::Box {
+    return gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(SPACING1).build();
+}
+
+fn label(text: &str) -> Label {
+    return Label::builder()
+        .label(text)
+        .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::Word)
+        .halign(Align::Start)
+        .build();
+}
+
+fn monospace(text: &str) -> Label {
+    let out = label(text);
+    out.set_wrap(false);
+    out.add_css_class("monospace");
+    return out;
+}
+
+#[derive(Clone)]
+enum Title {
+    Initialize(String),
+    Prompt(String),
+    Unlock(String),
+}
+
+async fn ui_choose(
+    app: &Application,
+    initial_warning: Option<String>,
+    title: Title,
+    choices: &Vec<Arc<FactorTree>>,
+) -> Option<Arc<FactorTree>> {
+    let (res_tx, mut res_rx) = mpsc::channel(1);
+    let layout = vbox();
+    attach_error(&layout, initial_warning);
+    layout.append(&label("Choose an unlock method."));
+    for (i, method) in choices.iter().enumerate() {
+        let button = gtk4::Button::builder().label(&method.desc).build();
+        if i == 0 {
+            button.add_css_class("suggested-action");
+        }
+        button.connect_clicked({
+            let method = method.clone();
+            let res_tx = res_tx.clone();
+            move |_| {
+                res_tx.try_send(method.clone()).unwrap();
+            }
+        });
+        layout.append(&button);
+    }
+    return select!{
+        _ = ui_window(&app, title, &layout) => None,
+        r = res_rx.recv() => r,
+    };
+}
+
+async fn ui_get_smartcard(
+    app: &Application,
+    card_stream: &mut CardStream,
+    initial_warning: Option<String>,
+    title: Title,
+    fingerprints: &[&str],
+) -> Option<openpgp_card_sequoia::Card<Open>> {
+    let layout = vbox();
+    attach_error(&layout, initial_warning);
+    layout.append(&label("Insert or swipe smartcard with GPG fingerprint:"));
+    for fingerprint in fingerprints {
+        layout.append(&monospace(&format!(" • {}", fingerprint)));
+    }
+    return select!{
+        _ = ui_window(&app, title, &layout) => None,
+        r = card_stream.next() => r,
+    };
+}
+
+/// Retry ui interaction as long as there are errors. `Ok(None)` aborts.
+async fn ui_loop<
+    T,
+    F: Future<Output = Result<Option<T>, UiErr>>,
+    N: FnMut(Application, Option<String>) -> F,
+>(log: &loga::Log, app: &Application, mut f: N) -> Result<Option<T>, loga::Error> {
+    let mut show_error = None;
+    loop {
+        match f(app.clone(), show_error.take()).await {
+            Ok(r) => return Ok(r),
+            Err(e) => match e {
+                UiErr::External(e, e_internal) => {
+                    if let Some(e_internal) = e_internal {
+                        log.log_err(loga::WARN, e_internal);
+                    };
+                    show_error = Some(e);
+                },
+                UiErr::Internal(e) => {
+                    log.log_err(
+                        loga::WARN,
+                        e.context("An unexpected issue occurred while unlocking/initializing unlock credentials."),
+                    );
+                    show_error = Some("An unexpected error occurred, see log for details.".to_string());
+                },
+                UiErr::InternalUnresolvable(e) => {
+                    return Err(e);
+                },
+            },
+        }
+    };
+}
+
+async fn ui_recovery_entry(
+    app: &Application,
+    initial_warning: Option<String>,
+    title: Title,
+    message: &str,
+) -> Option<Vec<u8>> {
+    let layout = vbox();
+    layout.append(&label(message));
+    let word_set = Rc::new(bip39().iter().map(|x| *x).collect::<HashSet<_>>());
+    let form_layout = grid();
+    let mut entries = vec![];
+    let mut tab_order = vec![];
+    for i in 0 .. BIP39_PHRASELEN {
+        let base_col = 1 + (i as i32 / (BIP39_PHRASELEN / 2) as i32) * 2;
+        let row = 1 + i as i32 % (BIP39_PHRASELEN / 2) as i32;
+        form_layout.attach(&halign_end(label(&format!("{}.", i + 1))), base_col, row, 1, 1);
+        let entry = gtk4::Entry::builder().hexpand(true).build();
+        entry.connect_changed({
+            let word_set = word_set.clone();
+            move |entry| {
+                if word_set.contains(entry.text().as_str()) {
+                    entry.remove_css_class("error");
+                } else {
+                    entry.add_css_class("error");
+                }
+            }
+        });
+        form_layout.attach(&entry, base_col + 1, row, 1, 1);
+        entries.push(entry.clone());
+        tab_order.push(entry.into());
+    }
+    layout.append(&form_layout);
+    let Some(phrase) = do_form_dialog(&app, initial_warning, title, &layout, Some(tab_order), move || {
+        for entry in &entries {
+            if !word_set.contains(entry.text().as_str()) {
+                return Err("Some words are spelled incorrectly".to_string());
+            }
+        }
+        return Ok(
+            entries.iter().map(|x| x.text().to_string()).collect::<Vec<_>>().join(" ").as_bytes().to_vec(),
+        );
+    }).await else {
+        return None;
+    };
+    return Some(phrase);
+}
+
+async fn ui_unlock_smartcard(
+    log: &Log,
+    app: &Application,
+    initial_warning: Option<String>,
+    title: Title,
+    config: &ConfigCredSmartcards,
+    state: &HashMap<String, Vec<u8>>,
+) -> Result<Option<Vec<u8>>, UiErr> {
+    let mut card_stream = CardStream::new(&log);
+
+    // Try various cards
+    let mut warning = initial_warning;
+    loop {
+        match async {
+            // Pin entry
+            let pin = if !config.fixed_pin {
+                const KEYS: &[&[Key]] =
+                    &[
+                        &[Key::Arabic_0, Key::KP_0, Key::N, Key::B],
+                        &[Key::Arabic_1, Key::KP_1, Key::M, Key::X],
+                        &[Key::Arabic_2, Key::KP_2, Key::comma, Key::C],
+                        &[Key::Arabic_3, Key::KP_3, Key::period, Key::V],
+                        &[Key::Arabic_4, Key::KP_4, Key::J, Key::S],
+                        &[Key::Arabic_5, Key::KP_5, Key::K, Key::D],
+                        &[Key::Arabic_6, Key::KP_6, Key::L, Key::F],
+                        &[Key::Arabic_7, Key::KP_7, Key::U, Key::W],
+                        &[Key::Arabic_8, Key::KP_8, Key::I, Key::E],
+                        &[Key::Arabic_9, Key::KP_9, Key::O, Key::R],
+                    ];
+                let layout = vbox();
+                attach_error(&layout, warning.take());
+                layout.append(&label("Enter card PIN."));
+                let digits =
+                    gtk4::PasswordEntry::builder().hexpand(true).show_peek_icon(true).can_focus(false).build();
+                let pin_layout = grid();
+                for i in -1 .. 9 as i32 {
+                    let column = if i == -1 {
+                        0
+                    } else {
+                        i.rem_euclid(3)
+                    };
+                    let row = 3 - i.div_floor(3);
+                    let value = (i + 1) as usize;
+                    let button = gtk4::Button::builder().label(value.to_string()).can_focus(false).build();
+                    button.connect_clicked({
+                        let digits = digits.clone();
+                        move |_button| {
+                            digits.set_text(&format!("{}{}", digits.text().as_str(), value.to_string()));
+                        }
+                    });
+                    add_shortcut(&button, KEYS[value], {
+                        let button = button.clone();
+                        move || button.emit_clicked()
+                    });
+                    pin_layout.attach(&button, column, row, 1, 1);
+                }
+                {
+                    let button = gtk4::Button::builder().icon_name("edit-clear").can_focus(false).build();
+                    button.connect_clicked({
+                        let digits = digits.clone();
+                        move |_button| {
+                            digits.set_text("");
+                        }
+                    });
+                    add_shortcut(&button, &[Key::BackSpace, Key::Delete], {
+                        let button = button.clone();
+                        move || button.emit_clicked()
+                    });
+                    pin_layout.attach(&button, 1, 4, 1, 1);
+                }
+                layout.append(&halign_center(pin_layout));
+                layout.append(&digits);
+                let pin = match do_form_dialog(&app, warning.take(), title.clone(), &layout, None, {
+                    let digits = digits.clone();
+                    move || {
+                        return Ok(digits.text().to_string());
+                    }
+                }).await {
+                    Some(x) => x,
+                    None => {
+                        return Ok(None);
+                    },
+                };
+                Some(pin)
+            } else {
+                None
+            };
+            let card =
+                match ui_get_smartcard(
+                    app,
+                    &mut card_stream,
+                    warning.take(),
+                    title.clone(),
+                    &state.keys().map(|x: &String| x.as_str()).collect::<Vec<_>>(),
+                ).await {
+                    Some(c) => c,
+                    None => {
+                        return Ok(None);
+                    },
+                };
+            let (card, pubkey) = get_card_pubkey(card).await?;
+            let Some(card_config) =
+                config.smartcards.iter().filter(|c| c.fingerprint == pubkey.fingerprint().to_string()).next() else {
+                    return Ok(None);
+                };
+            let card = card.enter_pin(card_config.pin.clone().or(pin)).await?;
+            match card
+                .decrypt(
+                    state
+                        .get(&card_config.fingerprint)
+                        .context_with(
+                            "Missing stored state for smartcard with fingerprint",
+                            ea!(fingerprint = card_config.fingerprint),
+                        )?
+                        .clone(),
+                )
+                .await? {
+                crypto::MaybeNeedTouch::NeedTouch(card) => {
+                    let layout = vbox();
+                    if let Some(warning) = warning.take() {
+                        layout.append(&label(&warning));
+                    }
+                    layout.append(
+                        &label(&format!("Confirm the action on the smartcard {}", card_config.fingerprint)),
+                    );
+                    return select!{
+                        _ = ui_window(&app, title.clone(), &layout) => Ok(None),
+                        r = card.wait_for_touch() => {
+                            let (_, decrypted) = r?;
+                            Ok(Some(decrypted))
+                        },
+                    };
+                },
+                crypto::MaybeNeedTouch::Decryptor(_, decrypted) => {
+                    return Ok(Some(decrypted));
+                },
+            }
+        }.await {
+            Ok(r) => return Ok(r),
+            Err(e) => match e {
+                UiErr::Internal(i) => {
+                    log.log_err(loga::WARN, i);
+                    warning = Some("Internal error, check logs for details.".to_string());
+                    continue;
+                },
+                UiErr::External(e, i) => {
+                    if let Some(i) = i {
+                        log.log_err(loga::WARN, i);
+                    }
+                    warning = Some(e);
+                    continue;
+                },
+                UiErr::InternalUnresolvable(e) => {
+                    return Err(UiErr::InternalUnresolvable(e));
+                },
+            },
+        }
+    }
+}
+
+/// Exits when manually closed. Closes window when dropped.
+async fn ui_window(app: &Application, title: Title, body: &impl gtk4::glib::object::IsA<gtk4::Widget>) {
+    let (close_tx, close_rx) = oneshot::channel();
+    let window = gtk4::ApplicationWindow::builder().application(app).title(&format!("Passworth - {}", match title {
+        Title::Initialize(x) => format!("Initialize [{}]", x),
+        Title::Unlock(x) => format!("Unlock [{}]", x),
+        Title::Prompt(x) => format!("Prompt [{}]", x),
+    })).resizable(false).build();
+    window.init_layer_shell();
+    window.set_layer(gtk4_layer_shell::Layer::Overlay);
+    window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::Exclusive);
+    window.connect_close_request({
+        let close_tx = RefCell::new(Some(close_tx));
+        move |_| {
+            if let Some(close_tx) = close_tx.borrow_mut().take() {
+                close_tx.send(()).ignore();
+            }
+            gtk4::glib::Propagation::Proceed
+        }
+    });
+    let display = RootExt::display(&window);
+    let wrap = vbox();
+    wrap.set_margin_bottom(SPACING2V);
+    wrap.set_margin_top(SPACING2V);
+    wrap.set_margin_start(SPACING2H);
+    wrap.set_margin_end(SPACING2H);
+    wrap.set_halign(Align::Center);
+    wrap.set_valign(Align::Center);
+    wrap.append(body);
+    window.set_child(Some(&wrap));
+    add_shortcut(&window, &[Key::Escape], {
+        let window = window.clone();
+        move || window.close()
+    });
+    window.present();
+    {
+        let monitors = display.monitors();
+        monitors.connect_items_changed({
+            let window = window.clone();
+            let last_monitor = RefCell::new(window.monitor());
+            move |list, position, removed_count, _added_count| {
+                for i in position .. position + removed_count {
+                    if *last_monitor.borrow() == list.item(i).map(|x| x.dynamic_cast::<Monitor>().unwrap()) {
+                        *last_monitor.borrow_mut() = None;
+                    }
+                }
+                if last_monitor.borrow().is_none() {
+                    superif!({
+                        for i in 0 .. position {
+                            break 'found list.item(i).unwrap().dynamic_cast::<Monitor>().unwrap();
+                        }
+                        for i in position .. list.n_items() {
+                            break 'found list.item(i).unwrap().dynamic_cast::<Monitor>().unwrap();
+                        }
+                    } m = 'found {
+                        window.set_monitor(Some(&m));
+                        *last_monitor.borrow_mut() = Some(m);
+                    });
+                }
+            }
+        });
+    }
+    let _defer = defer::defer(move || {
+        window.close();
+    });
+    close_rx.await.ignore();
+}
+
+fn vbox() -> gtk4::Box {
+    return gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).spacing(SPACING1).build();
 }

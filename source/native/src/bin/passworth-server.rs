@@ -1,25 +1,27 @@
 #![feature(int_roundings)]
 
+pub mod serverlib;
+
 use {
+    aargvark::{
+        Aargvark,
+        traits_impls::AargvarkJson,
+        vark,
+    },
+    chrono::Utc,
     crate::serverlib::{
         dbutil::open_privdb,
         factor::build_factor_tree,
         fg::{
-            FgState,
             B2F,
+            FgState,
         },
         permission::{
-            self,
             build_rule_tree,
             scan_principal,
+            self,
         },
     },
-    aargvark::{
-        traits_impls::AargvarkJson,
-        vark,
-        Aargvark,
-    },
-    chrono::Utc,
     flowcontrol::{
         exenum,
         shed,
@@ -30,13 +32,13 @@ use {
     },
     libc::c_void,
     loga::{
-        conversion::ResultIgnore,
-        ea,
-        fatal,
         DebugDisplay,
         ErrContext,
         Log,
         ResultContext,
+        conversion::ResultIgnore,
+        ea,
+        fatal,
     },
     passworth::{
         datapath::SpecificPath,
@@ -50,27 +52,27 @@ use {
     },
     passworth_shared_native::proto::ipc_path,
     sequoia_openpgp::{
+        Cert,
         cert::CertBuilder,
         packet::{
+            Key,
             key::{
                 SecretParts,
                 UnspecifiedRole,
             },
-            Key,
         },
         parse::{
-            stream::DecryptorBuilder,
             Parse,
+            stream::DecryptorBuilder,
         },
         policy::StandardPolicy,
         serialize::{
+            SerializeInto,
             stream::{
                 Message,
                 Signer,
             },
-            SerializeInto,
         },
-        Cert,
     },
     serde_json::json,
     serverlib::{
@@ -80,13 +82,13 @@ use {
             FactorTreeVariant,
         },
         fg::{
-            self,
             B2FInitialize,
             B2FUnlock,
+            self,
         },
         pidfd::{
-            pidfd,
             Inode,
+            pidfd,
         },
         privdb,
         pubdb,
@@ -118,27 +120,25 @@ use {
     taskmanager::TaskManager,
     tokio::{
         fs::{
-            self,
             create_dir_all,
+            self,
         },
         io::unix::AsyncFdReadyGuard,
         select,
         spawn,
         sync::{
+            Notify,
             broadcast,
             oneshot,
-            Notify,
         },
         task::spawn_blocking,
         time::{
-            sleep_until,
             Instant,
+            sleep_until,
         },
     },
     users::UsersCache,
 };
-
-pub mod serverlib;
 
 #[derive(Aargvark)]
 struct Args {
@@ -163,6 +163,16 @@ fn bury(root: &mut serde_json::Value, path: &SpecificPath, value: serde_json::Va
         at = next;
     }
     *at = value;
+}
+
+#[tokio::main]
+async fn main() {
+    match main2().await {
+        Ok(_) => { },
+        Err(e) => {
+            fatal(e);
+        },
+    }
 }
 
 async fn main2() -> Result<(), loga::Error> {
@@ -289,12 +299,12 @@ async fn main2() -> Result<(), loga::Error> {
     }
 
     struct State {
-        pubdb_path: PathBuf,
-        privdb_path: PathBuf,
-        root_factor: Arc<FactorTree>,
-        token_state: Mutex<TokenState>,
         fg_tx: tokio::sync::mpsc::Sender<B2F>,
         lock_timeout: u64,
+        privdb_path: PathBuf,
+        pubdb_path: PathBuf,
+        root_factor: Arc<FactorTree>,
+        token_state: Mutex<TokenState>,
     }
 
     let data_path = match args.config.source {
@@ -464,10 +474,7 @@ async fn main2() -> Result<(), loga::Error> {
                     state: prev_state.clone(),
                 }, resp_tx)).await.ignore();
                 unlock_result =
-                    resp_rx
-                        .await?
-                        .context("Error doing fg unlock")?
-                        .context("Config update unlock aborted by user")?;
+                    resp_rx.await?.context("Error doing fg unlock")?.context("Config update unlock aborted by user")?;
             }
 
             // Continue with init
@@ -520,8 +527,7 @@ async fn main2() -> Result<(), loga::Error> {
             }).await.context("Error committing new unlock credentials")?;
         }
         else {
-            let all_factors =
-                config.unlock_config.auth_factors.iter().map(|x| x.id.clone()).collect::<HashSet<_>>();
+            let all_factors = config.unlock_config.auth_factors.iter().map(|x| x.id.clone()).collect::<HashSet<_>>();
             let (resp_tx, resp_rx) = oneshot::channel();
             state.fg_tx.send(B2F::Initialize(B2FInitialize {
                 privdbc: None,
@@ -560,14 +566,14 @@ async fn main2() -> Result<(), loga::Error> {
     tm.critical_task("Command processing", {
         async fn get_privdb(state: &State) -> Result<rusqlite::Connection, loga::Error> {
             enum Invert {
+                Missing {
+                    token_tx: broadcast::Sender<String>,
+                },
                 Ready {
                     token: String,
                 },
                 Waiting {
                     token_rx: broadcast::Receiver<String>,
-                },
-                Missing {
-                    token_tx: broadcast::Sender<String>,
                 },
             }
 
@@ -1288,6 +1294,13 @@ async fn main2() -> Result<(), loga::Error> {
                                         }
 
                                         impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
+                                            fn check(
+                                                &mut self,
+                                                _structure: sequoia_openpgp::parse::stream::MessageStructure,
+                                            ) -> sequoia_openpgp::Result<()> {
+                                                return Ok(());
+                                            }
+
                                             fn get_certs(
                                                 &mut self,
                                                 ids: &[sequoia_openpgp::KeyHandle],
@@ -1299,13 +1312,6 @@ async fn main2() -> Result<(), loga::Error> {
                                                     }
                                                 }
                                                 return Ok(vec![]);
-                                            }
-
-                                            fn check(
-                                                &mut self,
-                                                _structure: sequoia_openpgp::parse::stream::MessageStructure,
-                                            ) -> sequoia_openpgp::Result<()> {
-                                                return Ok(());
                                             }
                                         }
 
@@ -1443,14 +1449,4 @@ async fn main2() -> Result<(), loga::Error> {
     // Start bg tasks (timeouts mainly) Wait forever
     tm.join(&log).await?;
     return Ok(());
-}
-
-#[tokio::main]
-async fn main() {
-    match main2().await {
-        Ok(_) => { },
-        Err(e) => {
-            fatal(e);
-        },
-    }
 }

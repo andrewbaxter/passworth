@@ -10,12 +10,81 @@ use {
     std::str::FromStr,
 };
 
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename = "snake_case", deny_unknown_fields)]
+pub struct GlobPath(pub Vec<GlobSeg>);
+
+impl FromStr for GlobPath {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut path = Reader::new(s);
+        let mut out = vec![];
+        while let Some((i, c)) = path.eat() {
+            if c != '/' {
+                return Err(format!("Path segment missing leading slash at {}", i));
+            }
+            let mut buf = vec![];
+            let mut escape = false;
+            let mut includes_wildcard = false;
+            while let Some((_, c)) = path.peek() {
+                if escape {
+                    path.eat();
+                    buf.push(c);
+                    escape = false;
+                } else {
+                    match c {
+                        '*' => {
+                            path.eat();
+                            includes_wildcard = true;
+                            buf.push('*');
+                        },
+                        '\\' => {
+                            path.eat();
+                            escape = true;
+                        },
+                        '/' => {
+                            break;
+                        },
+                        _ => {
+                            path.eat();
+                            buf.push(c);
+                        },
+                    }
+                }
+            }
+            let seg = buf.into_iter().collect::<String>();
+            if !seg.is_empty() {
+                if seg.len() == 1 && includes_wildcard {
+                    out.push(GlobSeg::Glob);
+                } else {
+                    out.push(GlobSeg::Lit(seg));
+                }
+            }
+        }
+        return Ok(Self(out));
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename = "snake_case", deny_unknown_fields)]
+pub enum GlobSeg {
+    Glob,
+    Lit(String),
+}
+
 struct Reader {
-    i: usize,
     data: Vec<char>,
+    i: usize,
 }
 
 impl Reader {
+    fn eat(&mut self) -> Option<(usize, char)> {
+        let out = self.peek();
+        self.i += 1;
+        return out;
+    }
+
     fn new(data: &str) -> Self {
         return Self {
             i: 0,
@@ -28,12 +97,6 @@ impl Reader {
             return None;
         }
         return Some((self.i, self.data[self.i]));
-    }
-
-    fn eat(&mut self) -> Option<(usize, char)> {
-        let out = self.peek();
-        self.i += 1;
-        return out;
     }
 }
 
@@ -96,68 +159,5 @@ impl ToString for SpecificPath {
             out.push_str(&seg.replace("\\", "\\\\").replace("/", "\\/"));
         }
         return out;
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
-#[serde(rename = "snake_case", deny_unknown_fields)]
-pub enum GlobSeg {
-    Lit(String),
-    Glob,
-}
-
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
-#[serde(rename = "snake_case", deny_unknown_fields)]
-pub struct GlobPath(pub Vec<GlobSeg>);
-
-impl FromStr for GlobPath {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut path = Reader::new(s);
-        let mut out = vec![];
-        while let Some((i, c)) = path.eat() {
-            if c != '/' {
-                return Err(format!("Path segment missing leading slash at {}", i));
-            }
-            let mut buf = vec![];
-            let mut escape = false;
-            let mut includes_wildcard = false;
-            while let Some((_, c)) = path.peek() {
-                if escape {
-                    path.eat();
-                    buf.push(c);
-                    escape = false;
-                } else {
-                    match c {
-                        '*' => {
-                            path.eat();
-                            includes_wildcard = true;
-                            buf.push('*');
-                        },
-                        '\\' => {
-                            path.eat();
-                            escape = true;
-                        },
-                        '/' => {
-                            break;
-                        },
-                        _ => {
-                            path.eat();
-                            buf.push(c);
-                        },
-                    }
-                }
-            }
-            let seg = buf.into_iter().collect::<String>();
-            if !seg.is_empty() {
-                if seg.len() == 1 && includes_wildcard {
-                    out.push(GlobSeg::Glob);
-                } else {
-                    out.push(GlobSeg::Lit(seg));
-                }
-            }
-        }
-        return Ok(Self(out));
     }
 }

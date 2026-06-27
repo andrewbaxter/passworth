@@ -1,21 +1,18 @@
-use {std::any::Any,
-loga::ErrContext};
+use {
+    loga::ErrContext,
+    std::any::Any,
+};
 
-pub enum UiErr {
-    Internal(loga::Error),
-    InternalUnresolvable(loga::Error),
-    External(String, Option<loga::Error>),
+pub trait FromAnyErr<T> {
+    fn any_context(self) -> Result<T, loga::Error>;
 }
 
-impl UiErr {
-    pub fn external(x: &str) -> UiErr {
-        return UiErr::External(x.to_string(), None);
-    }
-}
-
-impl From<loga::Error> for UiErr {
-    fn from(value: loga::Error) -> Self {
-        return Self::InternalUnresolvable(value);
+impl<T> FromAnyErr<T> for Result<T, Box<dyn Any + Send>> {
+    fn any_context(self) -> Result<T, loga::Error> {
+        return self.map_err(|e| match e.downcast::<&dyn std::error::Error>() {
+            Ok(e) => loga::Error::from(e),
+            Err(_) => loga::err("Opaque thread error"),
+        });
     }
 }
 
@@ -44,15 +41,20 @@ impl<T, E: Into<loga::Error>> ToUiErr<T> for Result<T, E> {
     }
 }
 
-pub trait FromAnyErr<T> {
-    fn any_context(self) -> Result<T, loga::Error>;
+pub enum UiErr {
+    External(String, Option<loga::Error>),
+    Internal(loga::Error),
+    InternalUnresolvable(loga::Error),
 }
 
-impl<T> FromAnyErr<T> for Result<T, Box<dyn Any + Send>> {
-    fn any_context(self) -> Result<T, loga::Error> {
-        return self.map_err(|e| match e.downcast::<&dyn std::error::Error>() {
-            Ok(e) => loga::Error::from(e),
-            Err(_) => loga::err("Opaque thread error"),
-        });
+impl UiErr {
+    pub fn external(x: &str) -> UiErr {
+        return UiErr::External(x.to_string(), None);
+    }
+}
+
+impl From<loga::Error> for UiErr {
+    fn from(value: loga::Error) -> Self {
+        return Self::InternalUnresolvable(value);
     }
 }

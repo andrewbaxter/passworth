@@ -1,14 +1,10 @@
 use {
-    super::error::{
-        ToUiErr,
-        UiErr,
-    },
     card_backend_pcsc::PcscBackend,
     chacha20poly1305::{
-        aead::Aead,
         AeadCore,
         ChaCha20Poly1305,
         KeyInit,
+        aead::Aead,
     },
     flowcontrol::shed,
     loga::{
@@ -16,13 +12,13 @@ use {
         ResultContext,
     },
     openpgp_card_sequoia::{
-        state::Open,
         PublicKey,
+        state::Open,
     },
     sequoia_openpgp::{
         parse::{
-            stream::DecryptorBuilder,
             Parse,
+            stream::DecryptorBuilder,
         },
         policy::StandardPolicy,
     },
@@ -38,73 +34,31 @@ use {
         collections::HashSet,
         io::Cursor,
         sync::{
+            Arc,
             atomic::{
                 AtomicBool,
                 Ordering,
             },
-            Arc,
         },
         thread::sleep,
         time::Duration,
+    },
+    super::error::{
+        ToUiErr,
+        UiErr,
     },
     tokio::{
         runtime,
         select,
         sync::{
             mpsc::{
-                self,
                 channel,
+                self,
             },
             oneshot,
         },
     },
 };
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EncryptedV1 {
-    ChaCha20Poly1305 {
-        body: Vec<u8>,
-        nonce: chacha20poly1305::Nonce,
-    },
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Encrypted {
-    V1(EncryptedV1),
-}
-
-fn chacha20poly1305_key(key: &[u8]) -> ChaCha20Poly1305 {
-    return ChaCha20Poly1305::new(&<Sha256 as Digest>::digest(key));
-}
-
-pub fn local_encrypt(key: &[u8], body: &[u8]) -> Vec<u8> {
-    let nonce = ChaCha20Poly1305::generate_nonce(&mut chacha20poly1305::aead::OsRng);
-    return serde_json::to_vec(&Encrypted::V1(EncryptedV1::ChaCha20Poly1305 {
-        body: chacha20poly1305_key(key).encrypt(&nonce, body).ok().unwrap().to_vec(),
-        nonce: nonce,
-    })).unwrap();
-}
-
-pub fn local_decrypt(key: &[u8], encrypted: &[u8]) -> Result<Option<Vec<u8>>, loga::Error> {
-    match serde_json::from_slice::<Encrypted>(&encrypted).context("Error parsing unencrypted body structure")? {
-        Encrypted::V1(e) => match e {
-            EncryptedV1::ChaCha20Poly1305 { nonce, body } => {
-                return Ok(chacha20poly1305_key(key).decrypt(&nonce, body.as_ref()).ok().map(|x| x.to_vec()));
-            },
-        },
-    }
-}
-
-#[test]
-fn test_local_crypt() {
-    let key = &[0u8, 14, 222, 13, 197, 112, 123, 45];
-    let body = "hello".as_bytes();
-    let encrypted = local_encrypt(key, body);
-    let decrypted = local_decrypt(key, &encrypted).expect("Must not have parse errors").expect("Must decrypt");
-    assert_eq!(String::from_utf8(body.to_vec()).unwrap(), String::from_utf8(decrypted).unwrap());
-}
 
 pub struct CardStream {
     alive: Arc<AtomicBool>,
@@ -249,11 +203,65 @@ impl Drop for CardStream {
 }
 
 struct CardThread {
-    pin_tx: Option<oneshot::Sender<Option<String>>>,
-    pin_rx: Option<oneshot::Receiver<Result<(), UiErr>>>,
+    decrypt_rx: mpsc::Receiver<Result<Vec<u8>, UiErr>>,
     decrypt_tx: mpsc::Sender<Vec<u8>>,
     need_touch_rx: mpsc::Receiver<()>,
-    decrypt_rx: mpsc::Receiver<Result<Vec<u8>, UiErr>>,
+    pin_rx: Option<oneshot::Receiver<Result<(), UiErr>>>,
+    pin_tx: Option<oneshot::Sender<Option<String>>>,
+}
+
+pub struct CardThreadDecryptor(CardThread);
+
+impl CardThreadDecryptor {
+    pub async fn decrypt(mut self, body: Vec<u8>) -> Result<MaybeNeedTouch, UiErr> {
+        self.0.decrypt_tx.send(body).await.unwrap();
+        select!{
+            _ = self.0.need_touch_rx.recv() => {
+                return Ok(MaybeNeedTouch::NeedTouch(CardThreadNeedTouch(self.0)));
+            }
+            b = self.0.decrypt_rx.recv() => {
+                return Ok(MaybeNeedTouch::Decryptor(CardThreadDecryptor(self.0), b.unwrap()?));
+            }
+        }
+    }
+}
+
+pub struct CardThreadNeedPin(CardThread);
+
+impl CardThreadNeedPin {
+    pub async fn enter_pin(mut self, pin: Option<String>) -> Result<CardThreadDecryptor, UiErr> {
+        self.0.pin_tx.take().unwrap().send(pin).unwrap();
+        self.0.pin_rx.take().unwrap().await.unwrap()?;
+        return Ok(CardThreadDecryptor(self.0));
+    }
+}
+
+pub struct CardThreadNeedTouch(CardThread);
+
+impl CardThreadNeedTouch {
+    pub async fn wait_for_touch(mut self) -> Result<(CardThreadDecryptor, Vec<u8>), UiErr> {
+        let b = self.0.decrypt_rx.recv().await.unwrap()?;
+        return Ok((CardThreadDecryptor(self.0), b));
+    }
+}
+
+fn chacha20poly1305_key(key: &[u8]) -> ChaCha20Poly1305 {
+    return ChaCha20Poly1305::new(&<Sha256 as Digest>::digest(key));
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Encrypted {
+    V1(EncryptedV1),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EncryptedV1 {
+    ChaCha20Poly1305 {
+        body: Vec<u8>,
+        nonce: chacha20poly1305::Nonce,
+    },
 }
 
 pub async fn get_card_pubkey(
@@ -369,44 +377,27 @@ pub async fn get_card_pubkey(
     }), pubkey));
 }
 
-pub struct CardThreadNeedPin(CardThread);
-
-impl CardThreadNeedPin {
-    pub async fn enter_pin(mut self, pin: Option<String>) -> Result<CardThreadDecryptor, UiErr> {
-        self.0.pin_tx.take().unwrap().send(pin).unwrap();
-        self.0.pin_rx.take().unwrap().await.unwrap()?;
-        return Ok(CardThreadDecryptor(self.0));
+pub fn local_decrypt(key: &[u8], encrypted: &[u8]) -> Result<Option<Vec<u8>>, loga::Error> {
+    match serde_json::from_slice::<Encrypted>(&encrypted).context("Error parsing unencrypted body structure")? {
+        Encrypted::V1(e) => match e {
+            EncryptedV1::ChaCha20Poly1305 { nonce, body } => {
+                return Ok(chacha20poly1305_key(key).decrypt(&nonce, body.as_ref()).ok().map(|x| x.to_vec()));
+            },
+        },
     }
 }
 
-pub struct CardThreadDecryptor(CardThread);
-
-impl CardThreadDecryptor {
-    pub async fn decrypt(mut self, body: Vec<u8>) -> Result<MaybeNeedTouch, UiErr> {
-        self.0.decrypt_tx.send(body).await.unwrap();
-        select!{
-            _ = self.0.need_touch_rx.recv() => {
-                return Ok(MaybeNeedTouch::NeedTouch(CardThreadNeedTouch(self.0)));
-            }
-            b = self.0.decrypt_rx.recv() => {
-                return Ok(MaybeNeedTouch::Decryptor(CardThreadDecryptor(self.0), b.unwrap()?));
-            }
-        }
-    }
+pub fn local_encrypt(key: &[u8], body: &[u8]) -> Vec<u8> {
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut chacha20poly1305::aead::OsRng);
+    return serde_json::to_vec(&Encrypted::V1(EncryptedV1::ChaCha20Poly1305 {
+        body: chacha20poly1305_key(key).encrypt(&nonce, body).ok().unwrap().to_vec(),
+        nonce: nonce,
+    })).unwrap();
 }
 
 pub enum MaybeNeedTouch {
-    NeedTouch(CardThreadNeedTouch),
     Decryptor(CardThreadDecryptor, Vec<u8>),
-}
-
-pub struct CardThreadNeedTouch(CardThread);
-
-impl CardThreadNeedTouch {
-    pub async fn wait_for_touch(mut self) -> Result<(CardThreadDecryptor, Vec<u8>), UiErr> {
-        let b = self.0.decrypt_rx.recv().await.unwrap()?;
-        return Ok((CardThreadDecryptor(self.0), b));
-    }
+    NeedTouch(CardThreadNeedTouch),
 }
 
 pub fn pgp_from_armor(key: &str) -> Result<sequoia_openpgp::Cert, loga::Error> {
@@ -415,4 +406,13 @@ pub fn pgp_from_armor(key: &str) -> Result<sequoia_openpgp::Cert, loga::Error> {
             .map_err(loga::err)
             .context("Error reading key data as armored pgp cert")?,
     );
+}
+
+#[test]
+fn test_local_crypt() {
+    let key = &[0u8, 14, 222, 13, 197, 112, 123, 45];
+    let body = "hello".as_bytes();
+    let encrypted = local_encrypt(key, body);
+    let decrypted = local_decrypt(key, &encrypted).expect("Must not have parse errors").expect("Must decrypt");
+    assert_eq!(String::from_utf8(body.to_vec()).unwrap(), String::from_utf8(decrypted).unwrap());
 }

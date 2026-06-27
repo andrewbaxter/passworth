@@ -1,9 +1,8 @@
 use {
-    super::pidfd::Inode,
     crate::serverlib::{
         fg::{
-            B2FPrompt,
             B2F,
+            B2FPrompt,
         },
         pidfd::pidfd,
     },
@@ -12,11 +11,11 @@ use {
         ta_return,
     },
     loga::{
-        ea,
         DebugDisplay,
         ErrContext,
         Log,
         ResultContext,
+        ea,
     },
     passworth::datapath::{
         GlobPath,
@@ -57,6 +56,7 @@ use {
             Mutex,
         },
     },
+    super::pidfd::Inode,
     tokio::{
         fs::{
             read,
@@ -64,8 +64,8 @@ use {
         },
         sync::oneshot,
         task::{
-            spawn,
             JoinHandle,
+            spawn,
         },
     },
     users::{
@@ -74,43 +74,6 @@ use {
         UsersCache,
     },
 };
-
-#[derive(Debug, Serialize)]
-pub struct RuleMatchUser {
-    pub walk_ancestors: usize,
-    pub user_id: Option<u32>,
-    pub group_id: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleMatchTag {
-    pub walk_ancestors: usize,
-    pub tag: String,
-    pub user_id: u32,
-}
-
-#[derive(Debug)]
-pub struct Rule {
-    pub id: usize,
-    pub match_tag: Option<RuleMatchTag>,
-    pub match_user: Option<RuleMatchUser>,
-    pub match_binary: Option<MatchBinary>,
-    pub permit: PermitLevel,
-    pub prompt: Option<ConfigPrompt>,
-}
-
-#[derive(Default, Debug)]
-pub struct RuleTree {
-    pub rules: Vec<Arc<Rule>>,
-    pub wildcard: Option<Box<RuleTree>>,
-    pub children: HashMap<String, RuleTree>,
-}
-
-#[derive(Clone)]
-pub struct RuleTreeRoot {
-    pub tree: Arc<RuleTree>,
-    pub any_match_binary: bool,
-}
 
 pub fn build_rule_tree(
     users: &UsersCache,
@@ -190,19 +153,263 @@ pub fn build_rule_tree(
     });
 }
 
-#[derive(Debug)]
-pub struct PrincipalMetaProc {
-    pid: i32,
-    uid: Option<u32>,
-    gid: Option<u32>,
-    binary: Option<PathBuf>,
-    first_arg_path: Option<PathBuf>,
-    tags: Option<HashSet<String>>,
+pub async fn permit(
+    log: &Log,
+    fg_tx: tokio::sync::mpsc::Sender<B2F>,
+    rules: &RuleTree,
+    principal: &PrincipalMeta,
+    paths: &[SpecificPath],
+) -> Result<Perms, loga::Error> {
+    let mut total_lock = true;
+    let mut total_meta = true;
+    let mut total_derive = true;
+    let mut total_read = true;
+    let mut total_write = true;
+
+    struct TotalPrompt {
+        rules: HashMap<usize, (String, u64)>,
+    }
+
+    let mut total_prompt = None;
+    for path in paths {
+        log.log(loga::DEBUG, format!("Permit: Testing permissions for path {:?}", path.0));
+        let mut new_tails = vec![];
+        let mut tails = vec![rules];
+        let mut path_lock = false;
+        let mut path_meta = false;
+        let mut path_derive = false;
+        let mut path_read = false;
+        let mut path_write = false;
+        let mut segs = path.0.iter();
+        loop {
+            let seg = segs.next();
+            for tail in tails.drain(..) {
+                for rule in &tail.rules {
+                    let mut rule_result = true;
+                    if let Some(match_binary) = &rule.match_binary {
+                        let match_result = shed!{
+                            'submatch _;
+                            for (depth, proc) in principal.chain.iter().enumerate() {
+                                shed!{
+                                    'fail _;
+                                    if proc.binary.as_ref() != Some(&match_binary.path) {
+                                        break 'fail;
+                                    }
+                                    log.log(loga::DEBUG, format!("Permit: MATCHED binary at [{}]", proc.pid));
+                                    if let Some(match_first_arg) = &match_binary.first_arg_path {
+                                        if proc.first_arg_path.as_ref() != Some(match_first_arg) {
+                                            break 'fail;
+                                        }
+                                        log.log(
+                                            loga::DEBUG,
+                                            format!("Permit: MATCHED binary first arg at [{}]", proc.pid),
+                                        );
+                                    }
+                                    break 'submatch true;
+                                }
+                                if depth >= match_binary.walk_ancestors {
+                                    break 'submatch false;
+                                }
+                            }
+                            break 'submatch false;
+                        };
+                        log.log_with(
+                            loga::DEBUG,
+                            format!("Permit: Match binary result: {}", match_result),
+                            ea!(match_ = serde_json::to_string_pretty(&match_binary).unwrap()),
+                        );
+                        rule_result = rule_result && match_result;
+                    }
+                    if let Some(match_tag) = &rule.match_tag {
+                        let match_result = shed!{
+                            'submatch _;
+                            for (depth, proc) in principal.chain.iter().enumerate() {
+                                let tags = proc.tags.as_ref();
+                                if tags.map(|x| x.contains(&match_tag.tag)).unwrap_or(false) &&
+                                    proc.uid.as_ref() == Some(&match_tag.user_id) {
+                                    log.log(
+                                        loga::DEBUG,
+                                        format!(
+                                            "Permit: MATCHED tag [{}] and user [{}] at [{}]",
+                                            match_tag.tag,
+                                            match_tag.user_id,
+                                            proc.pid
+                                        ),
+                                    );
+                                    break 'submatch true;
+                                }
+                                if depth >= match_tag.walk_ancestors {
+                                    break 'submatch false;
+                                }
+                            }
+                            break 'submatch false;
+                        };
+                        log.log_with(
+                            loga::DEBUG,
+                            format!("Permit: Match tag result: {}", match_result),
+                            ea!(match_ = serde_json::to_string_pretty(&match_tag).unwrap()),
+                        );
+                        rule_result = rule_result && match_result;
+                    }
+                    if let Some(match_user) = &rule.match_user {
+                        let match_result = shed!{
+                            'submatch _;
+                            for (depth, proc) in principal.chain.iter().enumerate() {
+                                shed!{
+                                    if let Some(match_user_id) = &match_user.user_id {
+                                        if proc.uid.as_ref() != Some(match_user_id) {
+                                            break;
+                                        }
+                                        log.log(loga::DEBUG, format!("Permit: MATCHED UID at [{}]", proc.pid));
+                                    }
+                                    if let Some(match_group_id) = &match_user.group_id {
+                                        if proc.gid.as_ref() != Some(match_group_id) {
+                                            break;
+                                        }
+                                        log.log(loga::DEBUG, format!("Permit: MATCHED GID at [{}]", proc.pid));
+                                    }
+                                    break 'submatch true;
+                                }
+                                if depth >= match_user.walk_ancestors {
+                                    rule_result = false;
+                                    break;
+                                }
+                            }
+                            break 'submatch false;
+                        };
+                        log.log_with(
+                            loga::DEBUG,
+                            format!("Permit: Match user result: {}", match_result),
+                            ea!(match_ = serde_json::to_string_pretty(&match_user).unwrap()),
+                        );
+                        rule_result = rule_result && match_result;
+                    }
+                    log.log(loga::DEBUG, format!("Permit: Rule result: {}", rule_result));
+                    if !rule_result {
+                        continue;
+                    }
+
+                    // Path permissions are union of permissions for each matching rule
+                    path_write = path_write || rule.permit as usize >= PermitLevel::Write as usize;
+                    path_read = path_read || rule.permit as usize >= PermitLevel::Read as usize;
+                    path_derive = path_derive || rule.permit as usize >= PermitLevel::Derive as usize;
+                    path_meta = path_meta || rule.permit as usize >= PermitLevel::Meta as usize;
+                    path_lock = path_lock || rule.permit as usize >= PermitLevel::Lock as usize;
+                    if let Some(rule_prompt) = &rule.prompt {
+                        let prompt = total_prompt.get_or_insert_with(|| TotalPrompt { rules: HashMap::new() });
+                        prompt
+                            .rules
+                            .insert(rule.id, (rule_prompt.description.clone(), rule_prompt.remember_seconds));
+                    }
+                }
+
+                // Descend
+                if let Some(seg) = seg {
+                    if let Some(wildcard) = &tail.wildcard {
+                        new_tails.push(wildcard.as_ref());
+                    }
+                    if let Some(child) = tail.children.get(seg) {
+                        new_tails.push(child);
+                    }
+                }
+            }
+            swap(&mut tails, &mut new_tails);
+            if seg.is_none() {
+                break;
+            }
+        }
+
+        // Overall permissions are most restrictive of permissions for any path
+        total_lock = total_lock && path_lock;
+        total_meta = total_meta && path_meta;
+        total_derive = total_derive && path_derive;
+        total_read = total_read && path_read;
+        total_write = total_write && path_write;
+    }
+    if let Some(prompt) = total_prompt {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        fg_tx.send(B2F::Prompt(B2FPrompt { prompt_rules: prompt.rules.clone() }, resp_tx)).await?;
+        match resp_rx.await.unwrap() {
+            Ok(Some(b)) => {
+                if !b {
+                    return Err(loga::err("User rejected access request"));
+                }
+            },
+            Ok(None) => {
+                return Err(loga::err("User rejected access request"));
+            },
+            Err(e) => {
+                return Err(e);
+            },
+        }
+    }
+    return Ok(Perms {
+        lock: total_lock,
+        meta: total_meta,
+        derive: total_derive,
+        read: total_read,
+        write: total_write,
+    });
+}
+
+pub struct Perms {
+    pub derive: bool,
+    pub lock: bool,
+    pub meta: bool,
+    pub read: bool,
+    pub write: bool,
 }
 
 pub struct PrincipalMeta {
     /// Starts at process, then first parent, then 2nd, etc.
     chain: Vec<PrincipalMetaProc>,
+}
+
+#[derive(Debug)]
+pub struct PrincipalMetaProc {
+    binary: Option<PathBuf>,
+    first_arg_path: Option<PathBuf>,
+    gid: Option<u32>,
+    pid: i32,
+    tags: Option<HashSet<String>>,
+    uid: Option<u32>,
+}
+
+#[derive(Debug)]
+pub struct Rule {
+    pub id: usize,
+    pub match_binary: Option<MatchBinary>,
+    pub match_tag: Option<RuleMatchTag>,
+    pub match_user: Option<RuleMatchUser>,
+    pub permit: PermitLevel,
+    pub prompt: Option<ConfigPrompt>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleMatchTag {
+    pub tag: String,
+    pub user_id: u32,
+    pub walk_ancestors: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleMatchUser {
+    pub group_id: Option<u32>,
+    pub user_id: Option<u32>,
+    pub walk_ancestors: usize,
+}
+
+#[derive(Default, Debug)]
+pub struct RuleTree {
+    pub children: HashMap<String, RuleTree>,
+    pub rules: Vec<Arc<Rule>>,
+    pub wildcard: Option<Box<RuleTree>>,
+}
+
+#[derive(Clone)]
+pub struct RuleTreeRoot {
+    pub any_match_binary: bool,
+    pub tree: Arc<RuleTree>,
 }
 
 pub async fn scan_principal(
@@ -211,12 +418,12 @@ pub async fn scan_principal(
     pid: i32,
 ) -> Result<PrincipalMeta, loga::Error> {
     struct AsyncPrincipalMetaProc {
-        pid: i32,
-        uid: Option<u32>,
-        gid: Option<u32>,
         binary: JoinHandle<Option<PathBuf>>,
         first_arg_path: JoinHandle<Option<PathBuf>>,
+        gid: Option<u32>,
+        pid: i32,
         tags: Pin<Box<dyn 'static + Sync + Send + Future<Output = Option<HashSet<String>>>>>,
+        uid: Option<u32>,
     }
 
     let mut chain0 = vec![];
@@ -446,211 +653,4 @@ pub async fn scan_principal(
             .join("\n")
     )).collect::<Vec<_>>().join("\n\n")));
     return Ok(PrincipalMeta { chain: chain1 });
-}
-
-pub struct Perms {
-    pub lock: bool,
-    pub meta: bool,
-    pub derive: bool,
-    pub read: bool,
-    pub write: bool,
-}
-
-pub async fn permit(
-    log: &Log,
-    fg_tx: tokio::sync::mpsc::Sender<B2F>,
-    rules: &RuleTree,
-    principal: &PrincipalMeta,
-    paths: &[SpecificPath],
-) -> Result<Perms, loga::Error> {
-    let mut total_lock = true;
-    let mut total_meta = true;
-    let mut total_derive = true;
-    let mut total_read = true;
-    let mut total_write = true;
-
-    struct TotalPrompt {
-        rules: HashMap<usize, (String, u64)>,
-    }
-
-    let mut total_prompt = None;
-    for path in paths {
-        log.log(loga::DEBUG, format!("Permit: Testing permissions for path {:?}", path.0));
-        let mut new_tails = vec![];
-        let mut tails = vec![rules];
-        let mut path_lock = false;
-        let mut path_meta = false;
-        let mut path_derive = false;
-        let mut path_read = false;
-        let mut path_write = false;
-        let mut segs = path.0.iter();
-        loop {
-            let seg = segs.next();
-            for tail in tails.drain(..) {
-                for rule in &tail.rules {
-                    let mut rule_result = true;
-                    if let Some(match_binary) = &rule.match_binary {
-                        let match_result = shed!{
-                            'submatch _;
-                            for (depth, proc) in principal.chain.iter().enumerate() {
-                                shed!{
-                                    'fail _;
-                                    if proc.binary.as_ref() != Some(&match_binary.path) {
-                                        break 'fail;
-                                    }
-                                    log.log(loga::DEBUG, format!("Permit: MATCHED binary at [{}]", proc.pid));
-                                    if let Some(match_first_arg) = &match_binary.first_arg_path {
-                                        if proc.first_arg_path.as_ref() != Some(match_first_arg) {
-                                            break 'fail;
-                                        }
-                                        log.log(
-                                            loga::DEBUG,
-                                            format!("Permit: MATCHED binary first arg at [{}]", proc.pid),
-                                        );
-                                    }
-                                    break 'submatch true;
-                                }
-                                if depth >= match_binary.walk_ancestors {
-                                    break 'submatch false;
-                                }
-                            }
-                            break 'submatch false;
-                        };
-                        log.log_with(
-                            loga::DEBUG,
-                            format!("Permit: Match binary result: {}", match_result),
-                            ea!(match_ = serde_json::to_string_pretty(&match_binary).unwrap()),
-                        );
-                        rule_result = rule_result && match_result;
-                    }
-                    if let Some(match_tag) = &rule.match_tag {
-                        let match_result = shed!{
-                            'submatch _;
-                            for (depth, proc) in principal.chain.iter().enumerate() {
-                                let tags = proc.tags.as_ref();
-                                if tags.map(|x| x.contains(&match_tag.tag)).unwrap_or(false) &&
-                                    proc.uid.as_ref() == Some(&match_tag.user_id) {
-                                    log.log(
-                                        loga::DEBUG,
-                                        format!(
-                                            "Permit: MATCHED tag [{}] and user [{}] at [{}]",
-                                            match_tag.tag,
-                                            match_tag.user_id,
-                                            proc.pid
-                                        ),
-                                    );
-                                    break 'submatch true;
-                                }
-                                if depth >= match_tag.walk_ancestors {
-                                    break 'submatch false;
-                                }
-                            }
-                            break 'submatch false;
-                        };
-                        log.log_with(
-                            loga::DEBUG,
-                            format!("Permit: Match tag result: {}", match_result),
-                            ea!(match_ = serde_json::to_string_pretty(&match_tag).unwrap()),
-                        );
-                        rule_result = rule_result && match_result;
-                    }
-                    if let Some(match_user) = &rule.match_user {
-                        let match_result = shed!{
-                            'submatch _;
-                            for (depth, proc) in principal.chain.iter().enumerate() {
-                                shed!{
-                                    if let Some(match_user_id) = &match_user.user_id {
-                                        if proc.uid.as_ref() != Some(match_user_id) {
-                                            break;
-                                        }
-                                        log.log(loga::DEBUG, format!("Permit: MATCHED UID at [{}]", proc.pid));
-                                    }
-                                    if let Some(match_group_id) = &match_user.group_id {
-                                        if proc.gid.as_ref() != Some(match_group_id) {
-                                            break;
-                                        }
-                                        log.log(loga::DEBUG, format!("Permit: MATCHED GID at [{}]", proc.pid));
-                                    }
-                                    break 'submatch true;
-                                }
-                                if depth >= match_user.walk_ancestors {
-                                    rule_result = false;
-                                    break;
-                                }
-                            }
-                            break 'submatch false;
-                        };
-                        log.log_with(
-                            loga::DEBUG,
-                            format!("Permit: Match user result: {}", match_result),
-                            ea!(match_ = serde_json::to_string_pretty(&match_user).unwrap()),
-                        );
-                        rule_result = rule_result && match_result;
-                    }
-                    log.log(loga::DEBUG, format!("Permit: Rule result: {}", rule_result));
-                    if !rule_result {
-                        continue;
-                    }
-
-                    // Path permissions are union of permissions for each matching rule
-                    path_write = path_write || rule.permit as usize >= PermitLevel::Write as usize;
-                    path_read = path_read || rule.permit as usize >= PermitLevel::Read as usize;
-                    path_derive = path_derive || rule.permit as usize >= PermitLevel::Derive as usize;
-                    path_meta = path_meta || rule.permit as usize >= PermitLevel::Meta as usize;
-                    path_lock = path_lock || rule.permit as usize >= PermitLevel::Lock as usize;
-                    if let Some(rule_prompt) = &rule.prompt {
-                        let prompt = total_prompt.get_or_insert_with(|| TotalPrompt { rules: HashMap::new() });
-                        prompt
-                            .rules
-                            .insert(rule.id, (rule_prompt.description.clone(), rule_prompt.remember_seconds));
-                    }
-                }
-
-                // Descend
-                if let Some(seg) = seg {
-                    if let Some(wildcard) = &tail.wildcard {
-                        new_tails.push(wildcard.as_ref());
-                    }
-                    if let Some(child) = tail.children.get(seg) {
-                        new_tails.push(child);
-                    }
-                }
-            }
-            swap(&mut tails, &mut new_tails);
-            if seg.is_none() {
-                break;
-            }
-        }
-
-        // Overall permissions are most restrictive of permissions for any path
-        total_lock = total_lock && path_lock;
-        total_meta = total_meta && path_meta;
-        total_derive = total_derive && path_derive;
-        total_read = total_read && path_read;
-        total_write = total_write && path_write;
-    }
-    if let Some(prompt) = total_prompt {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        fg_tx.send(B2F::Prompt(B2FPrompt { prompt_rules: prompt.rules.clone() }, resp_tx)).await?;
-        match resp_rx.await.unwrap() {
-            Ok(Some(b)) => {
-                if !b {
-                    return Err(loga::err("User rejected access request"));
-                }
-            },
-            Ok(None) => {
-                return Err(loga::err("User rejected access request"));
-            },
-            Err(e) => {
-                return Err(e);
-            },
-        }
-    }
-    return Ok(Perms {
-        lock: total_lock,
-        meta: total_meta,
-        derive: total_derive,
-        read: total_read,
-        write: total_write,
-    });
 }

@@ -29,19 +29,19 @@ use {
         utils::dig,
     },
     passworth_wasm::{
+        ToContent,
+        ToContentField,
+        ToContentUserPassword,
         browser,
         force_string,
         js_call,
         js_call2,
         js_get,
-        ToContent,
-        ToContentField,
-        ToContentUserPassword,
     },
     rooting::{
+        El,
         el,
         set_root,
-        El,
     },
     serde::{
         Deserialize,
@@ -60,34 +60,27 @@ use {
         JsValue,
     },
     wasm_bindgen_futures::{
-        spawn_local,
         JsFuture,
+        spawn_local,
     },
     web_sys::{
-        console,
         HtmlElement,
         HtmlInputElement,
         KeyboardEvent,
+        console,
     },
 };
 
+const CLASS_ACTION_FOCUS: &str = "s_action_focus";
+const CLASS_ASYNC: &str = "g_async";
+const CLASS_ERROR: &str = "g_err";
+const CLASS_GROUP: &str = "g_group";
+const CLASS_HBOX: &str = "g_hbox";
+const CLASS_VBOX: &str = "g_vbox";
 const ICON_CLOCK: &str = "&#xe8b5";
 const ICON_FIELD: &str = "&#xf51d";
 const ICON_PERSON: &str = "&#xe7fd";
-const CLASS_VBOX: &str = "g_vbox";
-const CLASS_HBOX: &str = "g_hbox";
-const CLASS_GROUP: &str = "g_group";
-const CLASS_ASYNC: &str = "g_async";
-const CLASS_ERROR: &str = "g_err";
-const CLASS_ACTION_FOCUS: &str = "s_action_focus";
-
-fn el_block_err(text: impl AsRef<str>) -> El {
-    return el("div").classes(&[CLASS_ERROR]).text(text.as_ref());
-}
-
-fn el_block_text(text: impl AsRef<str>) -> El {
-    return el("p").text(text.as_ref());
-}
+const STORAGE_PSL_KEY: &str = "psl";
 
 fn el_async(work: impl Future<Output = Result<El, String>> + 'static) -> El {
     return el("div").classes(&[CLASS_ASYNC]).own(move |el_| {
@@ -105,50 +98,12 @@ fn el_async(work: impl Future<Output = Result<El, String>> + 'static) -> El {
     });
 }
 
-fn el_vbox() -> El {
-    return el("div").classes(&[CLASS_VBOX]);
+fn el_block_err(text: impl AsRef<str>) -> El {
+    return el("div").classes(&[CLASS_ERROR]).text(text.as_ref());
 }
 
-fn el_hbox() -> El {
-    return el("div").classes(&[CLASS_HBOX]);
-}
-
-fn el_group() -> El {
-    return el("div").classes(&[CLASS_GROUP]);
-}
-
-struct State {
-    origin: RefCell<Option<String>>,
-    search_path: RefCell<Option<String>>,
-    focus: RefCell<Option<El>>,
-}
-
-fn storage_site_key(origin: &str) -> String {
-    return format!("site_{}", origin);
-}
-
-const STORAGE_PSL_KEY: &str = "psl";
-
-#[derive(Serialize, Deserialize)]
-enum PslEntry {
-    Branch(HashMap<String, PslEntry>),
-    Leaf,
-}
-
-type Psl = HashMap<String, PslEntry>;
-
-fn save_search_path(state: &Rc<State>) {
-    let Some(origin) = &*state.origin.borrow() else {
-        return;
-    };
-    let Some(search_path) = &*state.search_path.borrow() else {
-        return;
-    };
-    if let Err(e) = LocalStorage::set(&storage_site_key(origin), search_path) {
-        console::log_1(
-            &JsValue::from(format!("Error saving search path [{}] for origin [{}]: {}", search_path, origin, e)),
-        );
-    }
+fn el_block_text(text: impl AsRef<str>) -> El {
+    return el("p").text(text.as_ref());
 }
 
 fn el_choice_button<
@@ -210,6 +165,236 @@ fn el_choice_button<
     return button_el;
 }
 
+fn el_group() -> El {
+    return el("div").classes(&[CLASS_GROUP]);
+}
+
+fn el_hbox() -> El {
+    return el("div").classes(&[CLASS_HBOX]);
+}
+
+fn el_vbox() -> El {
+    return el("div").classes(&[CLASS_VBOX]);
+}
+
+async fn get_active_tab() -> (JsValue, JsValue) {
+    let tabs = js_get(&browser(), "tabs");
+    for tab in JsFuture::from(js_call(&tabs, "query", &JsValue::from_serde(&json!({
+        "currentWindow": true,
+        "active": true,
+    })).unwrap()).dyn_into::<Promise>().unwrap()).await.unwrap().dyn_into::<Array>().unwrap() {
+        return (tabs, tab);
+    }
+    panic!("Couldn't find active tab");
+}
+
+fn main() {
+    console_error_panic_hook::set_once();
+    let state = Rc::new(State {
+        origin: RefCell::new(None),
+        search_path: RefCell::new(None),
+        focus: RefCell::new(None),
+    });
+    let tree_root_el =
+        el_group().own(
+            |_| EventListener::new_with_options(&window(), "keydown", EventListenerOptions::run_in_capture_phase(), {
+                let state = state.clone();
+                move |ev| {
+                    let ev = ev.dyn_ref::<KeyboardEvent>().unwrap();
+                    if ev.code().to_ascii_lowercase() != "enter" {
+                        return;
+                    }
+                    let Some(focus) = state.focus.borrow_mut().clone() else {
+                        return;
+                    };
+                    focus.raw().dyn_into::<HtmlElement>().unwrap().click();
+                    ev.prevent_default();
+                    ev.set_cancel_bubble(true);
+                }
+            }),
+        );
+    let addr_el = el("input").classes(&["s_location"]);
+    let messages_el = el_group();
+    tree_root_el.ref_push(el_async({
+        let addr_el = addr_el.weak();
+        let messages_el = messages_el.weak();
+        let tree_root_el = tree_root_el.weak();
+        let state = state.clone();
+        async move {
+            let active_tab = get_active_tab().await.1;
+            let url = js_sys::Reflect::get(&active_tab, &JsValue::from("url")).unwrap().as_string().unwrap();
+            let url = Uri::from_str(&url).map_err(|e| format!("Unparsable URL: {}", e))?;
+            let search_string;
+            shed!{
+                // Try saved search path
+                if let Some(authority) = url.authority() {
+                    let origin = authority.to_string();
+                    *state.origin.borrow_mut() = Some(origin.clone());
+                    if let Ok(search_string0) = LocalStorage::get(storage_site_key(&origin)) {
+                        search_string = search_string0;
+                        break;
+                    }
+                }
+
+                // Get a reasonable search path from the current address host
+                let Some(host) = url.host() else {
+                    return Ok(el("div"));
+                };
+                let psl;
+                if let Ok(psl0) = LocalStorage::get::<Psl>(STORAGE_PSL_KEY) {
+                    psl = psl0;
+                } else {
+                    let mut psl0 = Psl::new();
+                    for line in reqwest::get("https://publicsuffix.org/list/public_suffix_list.dat")
+                        .await
+                        .map_err(|e| format!("Error fetching public suffix list for domain splitting: {}", e))?
+                        .text()
+                        .await
+                        .map_err(|e| format!("Error reading public suffix list data for domain splitting: {}", e))?
+                        .lines() {
+                        let line = line.trim();
+                        if line.starts_with("//") {
+                            continue;
+                        }
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let mut at = &mut psl0;
+                        let mut rev_segs = line.split(".").collect::<Vec<_>>();
+                        rev_segs.reverse();
+                        let tail = rev_segs.pop().unwrap();
+                        for seg in rev_segs {
+                            if exenum!(at.get_mut(seg), Some(PslEntry::Branch(_)) =>()).is_none() {
+                                at.insert(seg.to_string(), PslEntry::Branch(HashMap::new()));
+                            }
+                            at = exenum!(at.get_mut(seg), Some(PslEntry::Branch(p)) => p).unwrap();
+                        }
+                        at.entry(tail.to_string()).or_insert(PslEntry::Leaf);
+                    }
+                    LocalStorage::set(
+                        STORAGE_PSL_KEY,
+                        &psl0,
+                    ).map_err(|e| format!("Couldn't put public storage list in local storage: {}", e))?;
+                    psl = psl0;
+                }
+                let mut keep = vec![];
+                let mut at_psl = Some(psl);
+                for seg in host.split('.').rev() {
+                    if let Some(next_psl) = at_psl.and_then(|mut p| p.remove(seg)) {
+                        // Keep all psl segments
+                        keep.push(seg);
+                        at_psl = exenum!(next_psl, PslEntry:: Branch(p) => p);
+                    } else {
+                        // Keep 1 seg after psl
+                        keep.push(seg);
+                        break;
+                    }
+                }
+                keep.reverse();
+                search_string = SpecificPath(vec!["web".to_string(), keep.join(".")]).to_string();
+            }
+
+            // Set addr input
+            let Some(addr) = addr_el.upgrade() else {
+                return Ok(el("div"));
+            };
+            addr.ref_attr("value", &search_string);
+
+            // Start querying + building tree
+            let Some(tree_root_el) = tree_root_el.upgrade() else {
+                return Ok(el("div"));
+            };
+            let Some(messages_el) = messages_el.upgrade() else {
+                return Ok(el("div"));
+            };
+            update(&state, &tree_root_el, &messages_el, search_string);
+
+            // Temporary placeholder
+            return Ok(el("div"));
+        }
+    }));
+    addr_el.ref_on("input", {
+        let addr_el = addr_el.weak();
+        let messages_el = messages_el.weak();
+        let tree_root_el = tree_root_el.weak();
+        let state = state.clone();
+
+        // (hack: underscore makes various lints not apply (?) - they were wrong anyway,
+        // and `allow(...)` wasn't entirely working, plus upstream bugs (expr vs
+        // statement...))
+        let mut _input_debounce = None;
+        move |_| {
+            _input_debounce = Some(Timeout::new(300, {
+                let state = state.clone();
+                let addr_el = addr_el.clone();
+                let messages_el = messages_el.clone();
+                let tree_root_el = tree_root_el.clone();
+                move || {
+                    let Some(addr_el) = addr_el.upgrade() else {
+                        return;
+                    };
+                    let Some(messages_el) = messages_el.upgrade() else {
+                        return;
+                    };
+                    let Some(tree_root_el) = tree_root_el.upgrade() else {
+                        return;
+                    };
+                    update(
+                        &state,
+                        &tree_root_el,
+                        &messages_el,
+                        addr_el.raw().dyn_into::<HtmlInputElement>().unwrap().value(),
+                    );
+                }
+            }));
+        }
+    });
+    set_root(vec![el_vbox().classes(&["s_heading"]).push(addr_el).push(messages_el), tree_root_el]);
+}
+
+type Psl = HashMap<String, PslEntry>;
+
+#[derive(Serialize, Deserialize)]
+enum PslEntry {
+    Branch(HashMap<String, PslEntry>),
+    Leaf,
+}
+
+fn save_search_path(state: &Rc<State>) {
+    let Some(origin) = &*state.origin.borrow() else {
+        return;
+    };
+    let Some(search_path) = &*state.search_path.borrow() else {
+        return;
+    };
+    if let Err(e) = LocalStorage::set(&storage_site_key(origin), search_path) {
+        console::log_1(
+            &JsValue::from(format!("Error saving search path [{}] for origin [{}]: {}", search_path, origin, e)),
+        );
+    }
+}
+
+async fn send_to_content(message: impl Serialize) -> Result<(), String> {
+    let (tabs, tab) = get_active_tab().await;
+    let res =
+        JsFuture::from(
+            js_call2(
+                &tabs,
+                "sendMessage",
+                &js_sys::Reflect::get(&tab, &JsValue::from("id")).unwrap(),
+                &JsValue::from_serde(&message).unwrap(),
+            )
+                .dyn_into::<Promise>()
+                .unwrap(),
+        )
+            .await
+            .unwrap();
+    if res.is_null() {
+        return Ok(());
+    }
+    return Err(res.as_string().unwrap());
+}
+
 async fn send_to_native<T: ipc::msg::ReqTrait>(message: T) -> Result<T::Resp, String> {
     let message = message.to_enum();
     match JsValue::into_serde::<glove::Resp<T::Resp>>(
@@ -237,36 +422,14 @@ async fn send_to_native<T: ipc::msg::ReqTrait>(message: T) -> Result<T::Resp, St
     }
 }
 
-async fn get_active_tab() -> (JsValue, JsValue) {
-    let tabs = js_get(&browser(), "tabs");
-    for tab in JsFuture::from(js_call(&tabs, "query", &JsValue::from_serde(&json!({
-        "currentWindow": true,
-        "active": true,
-    })).unwrap()).dyn_into::<Promise>().unwrap()).await.unwrap().dyn_into::<Array>().unwrap() {
-        return (tabs, tab);
-    }
-    panic!("Couldn't find active tab");
+struct State {
+    focus: RefCell<Option<El>>,
+    origin: RefCell<Option<String>>,
+    search_path: RefCell<Option<String>>,
 }
 
-async fn send_to_content(message: impl Serialize) -> Result<(), String> {
-    let (tabs, tab) = get_active_tab().await;
-    let res =
-        JsFuture::from(
-            js_call2(
-                &tabs,
-                "sendMessage",
-                &js_sys::Reflect::get(&tab, &JsValue::from("id")).unwrap(),
-                &JsValue::from_serde(&message).unwrap(),
-            )
-                .dyn_into::<Promise>()
-                .unwrap(),
-        )
-            .await
-            .unwrap();
-    if res.is_null() {
-        return Ok(());
-    }
-    return Err(res.as_string().unwrap());
+fn storage_site_key(origin: &str) -> String {
+    return format!("site_{}", origin);
 }
 
 fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: String) {
@@ -467,168 +630,4 @@ fn update(state: &Rc<State>, tree_root_el: &El, messages_el: &El, raw_path: Stri
             }
         }
     }));
-}
-
-fn main() {
-    console_error_panic_hook::set_once();
-    let state = Rc::new(State {
-        origin: RefCell::new(None),
-        search_path: RefCell::new(None),
-        focus: RefCell::new(None),
-    });
-    let tree_root_el =
-        el_group().own(
-            |_| EventListener::new_with_options(&window(), "keydown", EventListenerOptions::run_in_capture_phase(), {
-                let state = state.clone();
-                move |ev| {
-                    let ev = ev.dyn_ref::<KeyboardEvent>().unwrap();
-                    if ev.code().to_ascii_lowercase() != "enter" {
-                        return;
-                    }
-                    let Some(focus) = state.focus.borrow_mut().clone() else {
-                        return;
-                    };
-                    focus.raw().dyn_into::<HtmlElement>().unwrap().click();
-                    ev.prevent_default();
-                    ev.set_cancel_bubble(true);
-                }
-            }),
-        );
-    let addr_el = el("input").classes(&["s_location"]);
-    let messages_el = el_group();
-    tree_root_el.ref_push(el_async({
-        let addr_el = addr_el.weak();
-        let messages_el = messages_el.weak();
-        let tree_root_el = tree_root_el.weak();
-        let state = state.clone();
-        async move {
-            let active_tab = get_active_tab().await.1;
-            let url = js_sys::Reflect::get(&active_tab, &JsValue::from("url")).unwrap().as_string().unwrap();
-            let url = Uri::from_str(&url).map_err(|e| format!("Unparsable URL: {}", e))?;
-            let search_string;
-            shed!{
-                // Try saved search path
-                if let Some(authority) = url.authority() {
-                    let origin = authority.to_string();
-                    *state.origin.borrow_mut() = Some(origin.clone());
-                    if let Ok(search_string0) = LocalStorage::get(storage_site_key(&origin)) {
-                        search_string = search_string0;
-                        break;
-                    }
-                }
-
-                // Get a reasonable search path from the current address host
-                let Some(host) = url.host() else {
-                    return Ok(el("div"));
-                };
-                let psl;
-                if let Ok(psl0) = LocalStorage::get::<Psl>(STORAGE_PSL_KEY) {
-                    psl = psl0;
-                } else {
-                    let mut psl0 = Psl::new();
-                    for line in reqwest::get("https://publicsuffix.org/list/public_suffix_list.dat")
-                        .await
-                        .map_err(|e| format!("Error fetching public suffix list for domain splitting: {}", e))?
-                        .text()
-                        .await
-                        .map_err(|e| format!("Error reading public suffix list data for domain splitting: {}", e))?
-                        .lines() {
-                        let line = line.trim();
-                        if line.starts_with("//") {
-                            continue;
-                        }
-                        if line.is_empty() {
-                            continue;
-                        }
-                        let mut at = &mut psl0;
-                        let mut rev_segs = line.split(".").collect::<Vec<_>>();
-                        rev_segs.reverse();
-                        let tail = rev_segs.pop().unwrap();
-                        for seg in rev_segs {
-                            if exenum!(at.get_mut(seg), Some(PslEntry::Branch(_)) =>()).is_none() {
-                                at.insert(seg.to_string(), PslEntry::Branch(HashMap::new()));
-                            }
-                            at = exenum!(at.get_mut(seg), Some(PslEntry::Branch(p)) => p).unwrap();
-                        }
-                        at.entry(tail.to_string()).or_insert(PslEntry::Leaf);
-                    }
-                    LocalStorage::set(
-                        STORAGE_PSL_KEY,
-                        &psl0,
-                    ).map_err(|e| format!("Couldn't put public storage list in local storage: {}", e))?;
-                    psl = psl0;
-                }
-                let mut keep = vec![];
-                let mut at_psl = Some(psl);
-                for seg in host.split('.').rev() {
-                    if let Some(next_psl) = at_psl.and_then(|mut p| p.remove(seg)) {
-                        // Keep all psl segments
-                        keep.push(seg);
-                        at_psl = exenum!(next_psl, PslEntry:: Branch(p) => p);
-                    } else {
-                        // Keep 1 seg after psl
-                        keep.push(seg);
-                        break;
-                    }
-                }
-                keep.reverse();
-                search_string = SpecificPath(vec!["web".to_string(), keep.join(".")]).to_string();
-            }
-
-            // Set addr input
-            let Some(addr) = addr_el.upgrade() else {
-                return Ok(el("div"));
-            };
-            addr.ref_attr("value", &search_string);
-
-            // Start querying + building tree
-            let Some(tree_root_el) = tree_root_el.upgrade() else {
-                return Ok(el("div"));
-            };
-            let Some(messages_el) = messages_el.upgrade() else {
-                return Ok(el("div"));
-            };
-            update(&state, &tree_root_el, &messages_el, search_string);
-
-            // Temporary placeholder
-            return Ok(el("div"));
-        }
-    }));
-    addr_el.ref_on("input", {
-        let addr_el = addr_el.weak();
-        let messages_el = messages_el.weak();
-        let tree_root_el = tree_root_el.weak();
-        let state = state.clone();
-
-        // (hack: underscore makes various lints not apply (?) - they were wrong anyway,
-        // and `allow(...)` wasn't entirely working, plus upstream bugs (expr vs
-        // statement...))
-        let mut _input_debounce = None;
-        move |_| {
-            _input_debounce = Some(Timeout::new(300, {
-                let state = state.clone();
-                let addr_el = addr_el.clone();
-                let messages_el = messages_el.clone();
-                let tree_root_el = tree_root_el.clone();
-                move || {
-                    let Some(addr_el) = addr_el.upgrade() else {
-                        return;
-                    };
-                    let Some(messages_el) = messages_el.upgrade() else {
-                        return;
-                    };
-                    let Some(tree_root_el) = tree_root_el.upgrade() else {
-                        return;
-                    };
-                    update(
-                        &state,
-                        &tree_root_el,
-                        &messages_el,
-                        addr_el.raw().dyn_into::<HtmlInputElement>().unwrap().value(),
-                    );
-                }
-            }));
-        }
-    });
-    set_root(vec![el_vbox().classes(&["s_heading"]).push(addr_el).push(messages_el), tree_root_el]);
 }

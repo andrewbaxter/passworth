@@ -1,18 +1,31 @@
 use {
-    super::privdb,
     libc::c_void,
     loga::{
-        ea,
         ErrContext,
         ResultContext,
+        ea,
     },
     rusqlite::{
         Connection,
         Transaction,
     },
     std::path::Path,
+    super::privdb,
     tokio::task::spawn_blocking,
 };
+
+pub fn open_privdb(path: &Path, token: &str) -> Result<Connection, loga::Error> {
+    let mut privdbc = rusqlite::Connection::open(&path).unwrap();
+    let token = token.as_bytes();
+    let res = unsafe {
+        libsqlite3_sys::sqlite3_key(privdbc.handle(), token.as_ptr() as *const c_void, token.len() as i32)
+    };
+    if res != 0 {
+        return Err(loga::err_with("Sqlcipher key operation exited with code", ea!(code = res)));
+    }
+    privdb::migrate(&mut privdbc).context("Error migrating private db")?;
+    return Ok(privdbc);
+}
 
 pub async fn tx<
     T: 'static + Send,
@@ -39,17 +52,4 @@ pub async fn tx<
             },
         }
     }).await?;
-}
-
-pub fn open_privdb(path: &Path, token: &str) -> Result<Connection, loga::Error> {
-    let mut privdbc = rusqlite::Connection::open(&path).unwrap();
-    let token = token.as_bytes();
-    let res = unsafe {
-        libsqlite3_sys::sqlite3_key(privdbc.handle(), token.as_ptr() as *const c_void, token.len() as i32)
-    };
-    if res != 0 {
-        return Err(loga::err_with("Sqlcipher key operation exited with code", ea!(code = res)));
-    }
-    privdb::migrate(&mut privdbc).context("Error migrating private db")?;
-    return Ok(privdbc);
 }

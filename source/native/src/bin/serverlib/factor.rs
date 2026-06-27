@@ -1,7 +1,7 @@
 use {
     loga::{
-        ea,
         Log,
+        ea,
     },
     passworth_native::config::latest::{
         ConfigAuthFactor,
@@ -16,22 +16,6 @@ use {
         sync::Arc,
     },
 };
-
-#[derive(PartialEq)]
-pub struct FactorTree {
-    pub id: String,
-    pub desc: String,
-    pub variant: FactorTreeVariant,
-}
-
-#[derive(PartialEq)]
-pub enum FactorTreeVariant {
-    And(Vec<Arc<FactorTree>>),
-    Or(Vec<Arc<FactorTree>>),
-    Password,
-    Smartcards(ConfigCredSmartcards),
-    RecoveryPhrase,
-}
 
 pub fn build_factor_tree(
     seen: &HashSet<String>,
@@ -105,4 +89,20 @@ pub fn build_factor_tree(
     });
     out_factors.insert(at_id.clone(), out.clone());
     return Ok(out);
+}
+
+#[derive(PartialEq)]
+pub struct FactorTree {
+    pub desc: String,
+    pub id: String,
+    pub variant: FactorTreeVariant,
+}
+
+#[derive(PartialEq)]
+pub enum FactorTreeVariant {
+    And(Vec<Arc<FactorTree>>),
+    Or(Vec<Arc<FactorTree>>),
+    Password,
+    RecoveryPhrase,
+    Smartcards(ConfigCredSmartcards),
 }

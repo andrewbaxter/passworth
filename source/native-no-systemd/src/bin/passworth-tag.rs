@@ -1,8 +1,8 @@
 use {
     aargvark::{
+        Aargvark,
         traits_impls::AargvarkFromStr,
         vark,
-        Aargvark,
     },
     loga::fatal,
     nix::unistd::execv,
@@ -13,30 +13,12 @@ use {
 
 const SEP: &str = "--";
 
-struct Sep;
-
-impl AargvarkFromStr for Sep {
-    fn from_str(s: &str) -> Result<Self, String> {
-        if s == SEP {
-            return Ok(Self);
-        } else {
-            return Err(format!("Expected [{}]", SEP));
-        }
-    }
-
-    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
-        return aargvark::help::HelpPattern(vec!{
-            aargvark::help::HelpPatternElement::Literal(format!("{}", SEP))
-        });
-    }
-}
-
 #[derive(Aargvark)]
 struct Args {
-    tags: Vec<aargvark::traits_impls::NotFlag>,
+    command: Vec<String>,
     #[allow(dead_code)]
     sep: Sep,
-    command: Vec<String>,
+    tags: Vec<aargvark::traits_impls::NotFlag>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -58,5 +40,22 @@ async fn main() {
         Err(e) => {
             fatal(e);
         },
+    }
+}
+struct Sep;
+
+impl AargvarkFromStr for Sep {
+    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
+        return aargvark::help::HelpPattern(vec!{
+            aargvark::help::HelpPatternElement::Literal(format!("{}", SEP)),
+        });
+    }
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s == SEP {
+            return Ok(Self);
+        } else {
+            return Err(format!("Expected [{}]", SEP));
+        }
     }
 }

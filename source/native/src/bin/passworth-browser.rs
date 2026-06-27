@@ -1,8 +1,8 @@
 use {
     loga::{
+        ResultContext,
         ea,
         fatal,
-        ResultContext,
     },
     passworth::ipc,
     passworth_shared_native::proto::ipc_path,

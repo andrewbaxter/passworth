@@ -1,7 +1,7 @@
 use {
     loga::{
-        ea,
         ResultContext,
+        ea,
     },
     std::{
         os::fd::OwnedFd,

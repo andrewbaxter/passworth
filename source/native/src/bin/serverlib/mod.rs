@@ -1,7 +1,10 @@
-pub mod privdb;
-pub mod pubdb;
 pub mod dbutil;
-pub mod fg;
 pub mod factor;
+pub mod fg;
 pub mod permission;
 pub mod pidfd;
+
+pub use passworth_native::{
+    privdb,
+    pubdb,
+};

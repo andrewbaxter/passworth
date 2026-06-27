@@ -1,5 +1,6 @@
 use {
     aargvark::{
+        Aargvark,
         traits::AargvarkCompleter,
         traits_impls::{
             AargvarkFile,
@@ -7,46 +8,41 @@ use {
             AargvarkJson,
         },
         vark,
-        Aargvark,
     },
     async_tempfile::TempFile,
     loga::{
-        ea,
-        fatal,
         DebugDisplay,
         ErrContext,
         Log,
         ResultContext,
+        ea,
+        fatal,
     },
     passworth::{
         datapath::SpecificPath,
         ipc::{
-            self,
             C2SGenerateVariant,
             C2SGenerateVariantAlphanumeric,
             C2SGenerateVariantAlphanumericSymbols,
             C2SGenerateVariantBytes,
             C2SGenerateVariantSafeAlphanumeric,
+            self,
         },
         utils::to_b32,
     },
-    passworth_native::{
-        crypto::{
-            get_card_pubkey,
-            CardStream,
-        },
+    passworth_native::crypto::{
+        CardStream,
+        get_card_pubkey,
     },
-    passworth_shared_native::{
-        proto::{
-            ipc_path,
-            req,
-        },
+    passworth_shared_native::proto::{
+        ipc_path,
+        req,
     },
     std::{
         io::{
-            stdin,
             Read,
             Write,
+            stdin,
         },
         path::Path,
         str::FromStr,
@@ -60,34 +56,9 @@ use {
     },
 };
 
-fn remove_prefix(value: serde_json::Value, path: &SpecificPath) -> serde_json::Value {
-    let mut value = value;
-    for seg in &path.0 {
-        match value {
-            serde_json::Value::Object(mut o) => value = o.remove(seg).unwrap(),
-            serde_json::Value::Null => {
-                value = serde_json::Value::Null;
-                break;
-            },
-            r => unreachable!("got {:?}", r),
-        }
-    }
-    return value;
-}
-
 struct AargvarkSpecificPath(SpecificPath);
 
 impl AargvarkFromStr for AargvarkSpecificPath {
-    fn from_str(s: &str) -> Result<Self, String> {
-        return Ok(AargvarkSpecificPath(SpecificPath::from_str(s).map_err(|e| e.to_string())?));
-    }
-
-    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
-        return aargvark::help::HelpPattern(
-            vec![aargvark::help::HelpPatternElement::Type("PATH/TO/DATA".to_string())],
-        );
-    }
-
     fn build_completer(arg: &str) -> AargvarkCompleter {
         let arg = arg.to_string();
         return Box::new(move || {
@@ -137,163 +108,29 @@ impl AargvarkFromStr for AargvarkSpecificPath {
             return out;
         });
     }
-}
 
-#[derive(Aargvark)]
-struct GenerateVariantBytes {
-    length: usize,
-}
+    fn build_help_pattern(_state: &mut aargvark::help::HelpState) -> aargvark::help::HelpPattern {
+        return aargvark::help::HelpPattern(
+            vec![aargvark::help::HelpPatternElement::Type("PATH/TO/DATA".to_string())],
+        );
+    }
 
-#[derive(Aargvark)]
-struct GenerateVariantSafeAlphanumeric {
-    length: usize,
-}
-
-#[derive(Aargvark)]
-struct GenerateVariantAlphanumeric {
-    length: usize,
-}
-
-#[derive(Aargvark)]
-struct GenerateVariantAlphanumericSymbols {
-    length: usize,
-}
-
-#[derive(Aargvark)]
-enum GenerateVariant {
-    /// Generate random bytes, encoded as zbase32
-    Bytes(GenerateVariantBytes),
-    /// Generate a password with a shorter visually-unambiguous, case-insensitive
-    /// alphanumeric characters.
-    SafeAlphanumeric(GenerateVariantSafeAlphanumeric),
-    /// Generate a password using upper and lowercase alphanumeric values.
-    Alphanumeric(GenerateVariantAlphanumeric),
-    /// Generate a password using upper and lowercase alphanumeric values and symbols.
-    AlphanumericSymbols(GenerateVariantAlphanumericSymbols),
-    /// Generate a PGP key.
-    Pgp,
-    /// Generate an SSH key.
-    Ssh,
-}
-
-#[derive(Aargvark)]
-struct ReadCommand {
-    /// A path to get data for, in `/path/to/data` format.
-    path: AargvarkSpecificPath,
-    /// Optionally retrieve the latest data at or before a previous revision id.
-    revision: Option<i64>,
-    /// Output json encoded data rather than de-quoting strings. This also allows
-    /// outputting a root null value.
-    json: Option<()>,
-}
-
-#[derive(Aargvark)]
-struct MetaKeysCommand {
-    /// A path to get keys for, in `/path/to/data` format.
-    path: AargvarkSpecificPath,
-    /// Optionally retrieve the latest data at or before a previous revision id.
-    revision: Option<i64>,
-}
-
-#[derive(Aargvark)]
-struct MetaPgpPubkeyCommand {
-    /// Path to the private key.
-    path: AargvarkSpecificPath,
-    /// Optionally retrieve the latest data at or before a previous revision id.
-    revision: Option<i64>,
-}
-
-#[derive(Aargvark)]
-struct MetaSshPubkeyCommand {
-    /// Path to the private key.
-    path: AargvarkSpecificPath,
-    /// Optionally retrieve the latest data at or before a previous revision id.
-    revision: Option<i64>,
-}
-
-#[derive(Aargvark)]
-struct WriteCommand {
-    /// Path to create/overwrite
-    path: AargvarkSpecificPath,
-    /// Input is already JSON so add directly rather than encode as JSON string
-    json: Option<()>,
-    /// Input is binary, store as a B64 JSON string
-    binary: Option<()>,
-}
-
-#[derive(Aargvark)]
-struct WriteEditCommand {
-    /// Path to create/overwrite
-    path: AargvarkSpecificPath,
-}
-
-#[derive(Aargvark)]
-struct WriteMoveCommand {
-    from: AargvarkSpecificPath,
-    to: AargvarkSpecificPath,
-    /// If force is off and the destination path already has data, this will error.
-    /// Setting force will override the data.
-    overwrite: Option<()>,
-}
-
-#[derive(Aargvark)]
-struct WriteGenerateCommand {
-    /// Where to store the generated data.
-    path: AargvarkSpecificPath,
-    /// What sort of data to generate.
-    variant: GenerateVariant,
-    /// Write the generated data even if data already exists at the path (overwrites
-    /// path).
-    overwrite: Option<()>,
-}
-
-#[derive(Aargvark)]
-struct DerivePgpSignCommand {
-    /// Path of key (in ascii-armor format) to sign with
-    key: AargvarkSpecificPath,
-    /// Data to sign.
-    data: AargvarkFile,
-}
-
-#[derive(Aargvark)]
-struct DerivePgpDecryptCommand {
-    /// Path of key (in ascii-armor format) to decrypt with
-    key: AargvarkSpecificPath,
-    /// Data to decrypt.
-    data: AargvarkFile,
-}
-
-#[derive(Aargvark)]
-struct DeriveOtpCommand {
-    /// Path of key (in `otpauth://` format) to decrypt with
-    key: AargvarkSpecificPath,
-}
-
-#[derive(Aargvark)]
-struct ListRevisionsCommand {
-    /// Retrieve the revision ids of the data at each path.
-    paths: Vec<AargvarkSpecificPath>,
-    /// Retrieve the revision data at a specific revision.
-    revision: Option<i64>,
-}
-
-#[derive(Aargvark)]
-struct RevertCommand {
-    /// Revert the data at the specified paths to their value at or before the
-    /// specified revision.
-    paths: Vec<AargvarkSpecificPath>,
-    /// The revision id.
-    #[vark(flag = "--revision")]
-    revision: i64,
+    fn from_str(s: &str) -> Result<Self, String> {
+        return Ok(AargvarkSpecificPath(SpecificPath::from_str(s).map_err(|e| e.to_string())?));
+    }
 }
 
 #[derive(Aargvark)]
 #[vark(break_help)]
 enum Command {
+    /// Generate an otp token from a stored `otpauth://` url.
+    DeriveOtp(DeriveOtpCommand),
+    /// Do pgp decryption on data using a stored key.
+    DerivePgpDecrypt(DerivePgpDecryptCommand),
+    /// Produce a detached pgp signature on data using a stored key.
+    DerivePgpSign(DerivePgpSignCommand),
     /// Execute a JSON IPC command directly (see ipc jsonschema).
     Json(AargvarkJson<ipc::msg::Req>),
-    /// Trigger unlock and wait for it to complete.
-    Unlock,
     /// Trigger lock and wait for it to complete.
     Lock,
     /// Unlock if locked, and retrieve the keys at the following paths (merged into one
@@ -313,6 +150,11 @@ enum Command {
     /// List revision ids and timestamps for any values under the specified paths
     /// (merged into one JSON tree).
     ReadRevisions(ListRevisionsCommand),
+    /// Listen for smartcards (usb and nfc) and show their fingerprints in a format
+    /// that can be used for config.
+    ScanCards,
+    /// Trigger unlock and wait for it to complete.
+    Unlock,
     /// Unlock if locked, and replace the data at the following paths. The data is read
     /// from stdin.
     Write(WriteCommand),
@@ -322,49 +164,89 @@ enum Command {
     /// first argument, and the contents of the file will be stored if it exits with no
     /// error.
     WriteEdit(WriteEditCommand),
-    /// Move data from one location to another.
-    WriteMove(WriteMoveCommand),
     /// Generate a secret and store it at the specified location - for asymmetric keys
     /// returns the public portion.
     WriteGenerate(WriteGenerateCommand),
+    /// Move data from one location to another.
+    WriteMove(WriteMoveCommand),
     /// Restore data from a previous revision. Note that this preserves history, so you
     /// can restore to before the restore to undo a restore operation.
     WriteRevert(RevertCommand),
-    /// Produce a detached pgp signature on data using a stored key.
-    DerivePgpSign(DerivePgpSignCommand),
-    /// Do pgp decryption on data using a stored key.
-    DerivePgpDecrypt(DerivePgpDecryptCommand),
-    /// Generate an otp token from a stored `otpauth://` url.
-    DeriveOtp(DeriveOtpCommand),
-    /// Listen for smartcards (usb and nfc) and show their fingerprints in a format
-    /// that can be used for config.
-    ScanCards,
 }
 
-fn output(data: impl AsRef<[u8]>) -> Result<(), loga::Error> {
-    match std::io::stdout().write_all(data.as_ref()) {
+#[derive(Aargvark)]
+struct DeriveOtpCommand {
+    /// Path of key (in `otpauth://` format) to decrypt with
+    key: AargvarkSpecificPath,
+}
+
+#[derive(Aargvark)]
+struct DerivePgpDecryptCommand {
+    /// Data to decrypt.
+    data: AargvarkFile,
+    /// Path of key (in ascii-armor format) to decrypt with
+    key: AargvarkSpecificPath,
+}
+
+#[derive(Aargvark)]
+struct DerivePgpSignCommand {
+    /// Data to sign.
+    data: AargvarkFile,
+    /// Path of key (in ascii-armor format) to sign with
+    key: AargvarkSpecificPath,
+}
+
+#[derive(Aargvark)]
+enum GenerateVariant {
+    /// Generate a password using upper and lowercase alphanumeric values.
+    Alphanumeric(GenerateVariantAlphanumeric),
+    /// Generate a password using upper and lowercase alphanumeric values and symbols.
+    AlphanumericSymbols(GenerateVariantAlphanumericSymbols),
+    /// Generate random bytes, encoded as zbase32
+    Bytes(GenerateVariantBytes),
+    /// Generate a PGP key.
+    Pgp,
+    /// Generate a password with a shorter visually-unambiguous, case-insensitive
+    /// alphanumeric characters.
+    SafeAlphanumeric(GenerateVariantSafeAlphanumeric),
+    /// Generate an SSH key.
+    Ssh,
+}
+
+#[derive(Aargvark)]
+struct GenerateVariantAlphanumeric {
+    length: usize,
+}
+
+#[derive(Aargvark)]
+struct GenerateVariantAlphanumericSymbols {
+    length: usize,
+}
+
+#[derive(Aargvark)]
+struct GenerateVariantBytes {
+    length: usize,
+}
+
+#[derive(Aargvark)]
+struct GenerateVariantSafeAlphanumeric {
+    length: usize,
+}
+
+#[derive(Aargvark)]
+struct ListRevisionsCommand {
+    /// Retrieve the revision ids of the data at each path.
+    paths: Vec<AargvarkSpecificPath>,
+    /// Retrieve the revision data at a specific revision.
+    revision: Option<i64>,
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    match main2().await {
         Ok(_) => { },
-        Err(e) => match e.kind() {
-            std::io::ErrorKind::BrokenPipe => {
-                return Ok(());
-            },
-            _ => {
-                return Err(e.into());
-            },
-        },
+        Err(e) => fatal(e),
     }
-    match std::io::stdout().flush() {
-        Ok(_) => { },
-        Err(e) => match e.kind() {
-            std::io::ErrorKind::BrokenPipe => {
-                return Ok(());
-            },
-            _ => {
-                return Err(e.into());
-            },
-        },
-    }
-    return Ok(());
 }
 
 async fn main2() -> Result<(), loga::Error> {
@@ -610,10 +492,124 @@ async fn main2() -> Result<(), loga::Error> {
     return Ok(());
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    match main2().await {
+#[derive(Aargvark)]
+struct MetaKeysCommand {
+    /// A path to get keys for, in `/path/to/data` format.
+    path: AargvarkSpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+#[derive(Aargvark)]
+struct MetaPgpPubkeyCommand {
+    /// Path to the private key.
+    path: AargvarkSpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+#[derive(Aargvark)]
+struct MetaSshPubkeyCommand {
+    /// Path to the private key.
+    path: AargvarkSpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+fn output(data: impl AsRef<[u8]>) -> Result<(), loga::Error> {
+    match std::io::stdout().write_all(data.as_ref()) {
         Ok(_) => { },
-        Err(e) => fatal(e),
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::BrokenPipe => {
+                return Ok(());
+            },
+            _ => {
+                return Err(e.into());
+            },
+        },
     }
+    match std::io::stdout().flush() {
+        Ok(_) => { },
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::BrokenPipe => {
+                return Ok(());
+            },
+            _ => {
+                return Err(e.into());
+            },
+        },
+    }
+    return Ok(());
+}
+
+#[derive(Aargvark)]
+struct ReadCommand {
+    /// Output json encoded data rather than de-quoting strings. This also allows
+    /// outputting a root null value.
+    json: Option<()>,
+    /// A path to get data for, in `/path/to/data` format.
+    path: AargvarkSpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+fn remove_prefix(value: serde_json::Value, path: &SpecificPath) -> serde_json::Value {
+    let mut value = value;
+    for seg in &path.0 {
+        match value {
+            serde_json::Value::Object(mut o) => value = o.remove(seg).unwrap(),
+            serde_json::Value::Null => {
+                value = serde_json::Value::Null;
+                break;
+            },
+            r => unreachable!("got {:?}", r),
+        }
+    }
+    return value;
+}
+
+#[derive(Aargvark)]
+struct RevertCommand {
+    /// Revert the data at the specified paths to their value at or before the
+    /// specified revision.
+    paths: Vec<AargvarkSpecificPath>,
+    /// The revision id.
+    #[vark(flag = "--revision")]
+    revision: i64,
+}
+
+#[derive(Aargvark)]
+struct WriteCommand {
+    /// Input is binary, store as a B64 JSON string
+    binary: Option<()>,
+    /// Input is already JSON so add directly rather than encode as JSON string
+    json: Option<()>,
+    /// Path to create/overwrite
+    path: AargvarkSpecificPath,
+}
+
+#[derive(Aargvark)]
+struct WriteEditCommand {
+    /// Path to create/overwrite
+    path: AargvarkSpecificPath,
+}
+
+#[derive(Aargvark)]
+struct WriteGenerateCommand {
+    /// Write the generated data even if data already exists at the path (overwrites
+    /// path).
+    overwrite: Option<()>,
+    /// Where to store the generated data.
+    path: AargvarkSpecificPath,
+    /// What sort of data to generate.
+    variant: GenerateVariant,
+}
+
+#[derive(Aargvark)]
+struct WriteMoveCommand {
+    from: AargvarkSpecificPath,
+    /// If force is off and the destination path already has data, this will error.
+    /// Setting force will override the data.
+    overwrite: Option<()>,
+    to: AargvarkSpecificPath,
 }
