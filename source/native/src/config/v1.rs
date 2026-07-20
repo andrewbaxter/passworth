@@ -156,15 +156,15 @@ pub struct MatchUser {
 pub enum PermitLevel {
     /// Use the contents of values without directly revealing the value:generate
     /// signatures, decryption, totp generation, etc.
-    Derive,
+    Derive = 2,
     /// Lock and unlock the password store
     Lock = 0,
     /// Retrieve json keys but not values, public keys derived from stored private keys.
-    Meta,
+    Meta = 1,
     /// Retrieve the contents of values
-    Read,
+    Read = 3,
     /// Set values
-    Write,
+    Write = 4,
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]

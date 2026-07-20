@@ -1,5 +1,5 @@
 { pkgs, lib }: rec {
-  fenix = import (fetchTarball "https://github.com/nix-community/fenix/archive/1a79901b0e37ca189944e24d9601c8426675de50.zip") { };
+  fenix = import (fetchTarball "https://github.com/nix-community/fenix/archive/480c95c3c9ca478e857f7153639010fb54ec73e8.zip") { };
   toolchain = fenix.combine [
     fenix.latest.rustc
     fenix.latest.cargo
