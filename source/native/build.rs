@@ -40,7 +40,7 @@ fn main() {
         }
         generate(GenerateArgs {
             db_name: Some("pubdb".to_string()),
-            versions: vec![(1usize, v.build())],
+            versions: vec![(0usize, v.build())],
             ..Default::default()
         }).unwrap();
     }
@@ -59,7 +59,7 @@ fn main() {
         }
         generate(GenerateArgs {
             db_name: Some("privdb".to_string()),
-            versions: vec![(1usize, v.build())],
+            versions: vec![(0usize, v.build())],
             ..Default::default()
         }).unwrap();
     }
