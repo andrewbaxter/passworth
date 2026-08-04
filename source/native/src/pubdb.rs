@@ -104,7 +104,6 @@ pub struct FactorRow {
 }
 
 pub fn migrate<C: SqliteConnection>(db: &mut C) -> Result<(), GoodError> {
-    let _ = db.execute("update __good_version set version = 1 where version = 0", []);
     let _wrapper = dbm::migrate(db, None)?;
     Ok(())
 }

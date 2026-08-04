@@ -1014,7 +1014,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33d852cb9b869c2a9b3df2f71a3074817f01e1844f839a144f5fcef059a4eb5d"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1408,7 +1408,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1509,9 +1509,9 @@ dependencies = [
 
 [[package]]
 name = "good-ormning"
-version = "0.5.14"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de270def64c7aaa8e8ca01a11cf043ed796223967e57b6a48d0d41d1ee03145e"
+checksum = "74ae072c40d20ef3d83a49e229a81f6f09ceed7dfcd5fd7330ea835a809600d6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1538,9 +1538,9 @@ dependencies = [
 
 [[package]]
 name = "good-ormning-core"
-version = "0.5.14"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ea752ef23fb6a156e28c303c37e64c1362dd673cdf8bc31b9b499b90913243b"
+checksum = "976cc33b3d344592c68679837860e9fd858ed08978df3e4f7c82d2cf066bf494"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1563,9 +1563,9 @@ dependencies = [
 
 [[package]]
 name = "good-ormning-macros"
-version = "0.5.14"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "381eae5f2c0de09564d8779a61b7d9ff3d31cc35692e3d333019217920a95fcc"
+checksum = "c85342633f6195394e132da927b05a8068d7e7bab69002f5eb69e5ff16fff441"
 dependencies = [
  "convert_case 0.7.1",
  "good-ormning-core",
@@ -3035,7 +3035,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3547,7 +3547,7 @@ dependencies = [
  "getrandom 0.3.1",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4168,7 +4168,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
