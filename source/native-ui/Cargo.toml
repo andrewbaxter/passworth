@@ -1,0 +1,24 @@
+[package]
+name = "passworth-native-ui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# GTK user interface helper for passworth-server. Kept in a separate crate so the
+# server binary doesn't link GTK at all.
+[[bin]]
+name = "passworth-ui"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_12"] }
+gtk4-layer-shell = "0.5"
+passworth-native = { path = "../native" }
+serde_json = "1"
+async-channel = "2"
+libc = "0.2"
+flowcontrol = "0.2"
+defer = "0.2"
+
+[lints.clippy]
+all = "allow"

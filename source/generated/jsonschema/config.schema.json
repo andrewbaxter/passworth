@@ -53,6 +53,18 @@
           "enum": [
             "v1"
           ]
+        },
+        "ui": {
+          "description": "How to run the `passworth-ui` helper that shows unlock and prompt windows.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConfigUi"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -176,7 +188,8 @@
     "ConfigPermissionRule": {
       "type": "object",
       "required": [
-        "paths"
+        "paths",
+        "permit"
       ],
       "properties": {
         "match_binary": {
@@ -191,12 +204,16 @@
             }
           ]
         },
-        "match_systemd": {
-          "description": "Match requesting processes against a systemd service name (via service pid).",
+        "match_tag": {
+          "description": "Match requesting processes against a tag name (via passworth-tag) and tagging user.",
           "default": null,
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MatchTag"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "match_user": {
@@ -218,25 +235,13 @@
             "type": "string"
           }
         },
-        "permit_derive": {
-          "description": "Permission to lock/unlock and indirectly access data via derivation - totp, asymmetric signatures, decryption",
-          "default": false,
-          "type": "boolean"
-        },
-        "permit_lock": {
+        "permit": {
           "description": "Permission to explicitly lock or unlock.",
-          "default": false,
-          "type": "boolean"
-        },
-        "permit_read": {
-          "description": "Lock/unlock or read the credential data itself",
-          "default": false,
-          "type": "boolean"
-        },
-        "permit_write": {
-          "description": "Lock/unlock, write or read the credential data itself.",
-          "default": false,
-          "type": "boolean"
+          "allOf": [
+            {
+              "$ref": "#/definitions/PermitLevel"
+            }
+          ]
         },
         "prompt": {
           "description": "Configure if access requires prompting.",
@@ -271,26 +276,105 @@
       },
       "additionalProperties": false
     },
+    "ConfigUi": {
+      "description": "The GTK user interface runs in a separate helper process (`passworth-ui`) which never sees the database or derived keys, only what the user types.",
+      "type": "object",
+      "properties": {
+        "binary": {
+          "description": "Path to the `passworth-ui` binary. Defaults to `passworth-ui` next to the server binary.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "description": "Extra environment variables for the helper, e.g. `WAYLAND_DISPLAY`. The server's own environment is passed through as well.",
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "user": {
+          "description": "Run the helper as this user (requires the server to run as root). `HOME` is set from passwd and `XDG_RUNTIME_DIR` to `/run/user/UID` unless overridden in `env`. Recommended when the server runs as root and the desktop session does not.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserGroupId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "MatchBinary": {
+      "description": "Match a single process running a specific binary. Note that this will match interpreters for scripts, not the script being run (even if the script is run directly via shebang).",
       "type": "object",
       "required": [
         "path"
       ],
       "properties": {
+        "first_arg_path": {
+          "description": "The first argument (excluding argument 0, the exe itself) is a path that's present in the root filesystem, the argument.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
+          "description": "The absolute path of an executable to match.",
           "type": "string"
         },
         "walk_ancestors": {
-          "default": false,
-          "type": "boolean"
+          "description": "Sufficient if any ancestor up to this number of steps away from the process doing IPC matches (excluding the process itself). Defaults to 0.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchTag": {
+      "description": "Match a single process or ancestor with both a tag set by `passworth-tag` and a specific user id.",
+      "type": "object",
+      "required": [
+        "tag",
+        "user"
+      ],
+      "properties": {
+        "tag": {
+          "description": "The target or ancestor must have this tag.",
+          "type": "string"
+        },
+        "user": {
+          "description": "The target or ancestor must have this owner user.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/UserGroupId"
+            }
+          ]
+        },
+        "walk_ancestors": {
+          "description": "Sufficient if any ancestor up to this number of steps away from the process doing IPC matches (excluding the process itself). Defaults to 0.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
         }
       },
       "additionalProperties": false
     },
     "MatchUser": {
+      "description": "Match a single process run as a specific user and/or group.",
       "type": "object",
       "properties": {
         "group": {
+          "description": "The target or ancestor must have this owner group.",
           "default": null,
           "anyOf": [
             {
@@ -302,6 +386,7 @@
           ]
         },
         "user": {
+          "description": "The target or ancestor must have this owner user.",
           "default": null,
           "anyOf": [
             {
@@ -313,21 +398,64 @@
           ]
         },
         "walk_ancestors": {
-          "default": false,
-          "type": "boolean"
+          "description": "Sufficient if any ancestor up to this number of steps away from the process doing IPC matches (excluding the process itself). Defaults to 0.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
         }
       },
       "additionalProperties": false
     },
+    "PermitLevel": {
+      "description": "Actions permitted by a rule. Later levels include all prior levels.",
+      "oneOf": [
+        {
+          "description": "Use the contents of values without directly revealing the value:generate signatures, decryption, totp generation, etc.",
+          "type": "string",
+          "enum": [
+            "derive"
+          ]
+        },
+        {
+          "description": "Lock and unlock the password store",
+          "type": "string",
+          "enum": [
+            "lock"
+          ]
+        },
+        {
+          "description": "Retrieve json keys but not values, public keys derived from stored private keys.",
+          "type": "string",
+          "enum": [
+            "meta"
+          ]
+        },
+        {
+          "description": "Retrieve the contents of values",
+          "type": "string",
+          "enum": [
+            "read"
+          ]
+        },
+        {
+          "description": "Set values",
+          "type": "string",
+          "enum": [
+            "write"
+          ]
+        }
+      ]
+    },
     "UserGroupId": {
       "anyOf": [
-        {
-          "type": "string"
-        },
         {
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
+        },
+        {
+          "type": "string"
         }
       ]
     }

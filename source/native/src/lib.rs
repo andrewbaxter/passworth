@@ -4,3 +4,4 @@ pub mod error;
 pub mod generate;
 pub mod privdb;
 pub mod pubdb;
+pub mod uiproto;

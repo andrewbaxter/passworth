@@ -54,6 +54,9 @@ pub fn factor_add<C: SqliteConnection>(db: &mut C, id: &str, state: &[u8]) -> Re
              "factor_state" ("id", "state")
            values
              (?1, ?2)
+           on conflict ("id") do update
+           set
+             "state" = ?2
            "#;
         &mut db,
         p1: string = id,

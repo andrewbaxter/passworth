@@ -1,5 +1,3 @@
-#![feature(int_roundings)]
-
 pub mod serverlib;
 
 use {
@@ -26,10 +24,6 @@ use {
         exenum,
         shed,
     },
-    gtk4::{
-        glib::LogLevels,
-        prelude::ApplicationExtManual,
-    },
     libc::c_void,
     loga::{
         DebugDisplay,
@@ -47,7 +41,10 @@ use {
     },
     passworth_native::{
         config,
-        crypto::pgp_from_armor,
+        crypto::{
+            TokenScheme,
+            pgp_from_armor,
+        },
         generate,
     },
     passworth_shared_native::proto::ipc_path,
@@ -92,9 +89,9 @@ use {
         },
         privdb,
         pubdb,
+        uiclient::UiSpawnConfig,
     },
     std::{
-        cell::RefCell,
         collections::{
             HashMap,
             HashSet,
@@ -128,7 +125,6 @@ use {
         spawn,
         sync::{
             Notify,
-            broadcast,
             oneshot,
         },
         task::spawn_blocking,
@@ -137,7 +133,11 @@ use {
             sleep_until,
         },
     },
-    users::UsersCache,
+    users::{
+        Users,
+        UsersCache,
+        os::unix::UserExt,
+    },
 };
 
 #[derive(Aargvark)]
@@ -165,6 +165,77 @@ fn bury(root: &mut serde_json::Value, path: &SpecificPath, value: serde_json::Va
     *at = value;
 }
 
+fn parse_row_data(data: &str) -> Result<serde_json::Value, loga::Error> {
+    return Ok(
+        serde_json::from_str::<serde_json::Value>(data).context("Corrupt (non-JSON) value found in database")?,
+    );
+}
+
+fn parse_row_path(path: &str) -> Result<SpecificPath, loga::Error> {
+    return Ok(
+        SpecificPath::from_str(path).map_err(loga::err).context("Corrupt (unparsable) path found in database")?,
+    );
+}
+
+/// After leaf/explicit changes have been recorded, propagate them up the tree: an
+/// `and` whose child token changed has a changed token itself, an `or` whose child
+/// token changed needs its state regenerated. Returns whether the node's token
+/// changed.
+fn propagate_changes(
+    node: &Arc<FactorTree>,
+    token_changed: &mut HashSet<String>,
+    state_changed: &mut HashSet<String>,
+) -> bool {
+    match &node.variant {
+        FactorTreeVariant::And(children) => {
+            let mut any = false;
+            for child in children {
+                if propagate_changes(child, token_changed, state_changed) {
+                    any = true;
+                }
+            }
+            if any {
+                token_changed.insert(node.id.clone());
+            }
+        },
+        FactorTreeVariant::Or(children) => {
+            let mut any = false;
+            for child in children {
+                if propagate_changes(child, token_changed, state_changed) {
+                    any = true;
+                }
+            }
+            if any {
+                state_changed.insert(node.id.clone());
+            }
+        },
+        FactorTreeVariant::Password | FactorTreeVariant::RecoveryPhrase | FactorTreeVariant::Smartcards(_) => { },
+    }
+    return token_changed.contains(&node.id);
+}
+
+/// Which factors' tokens are different between the legacy and current schemes (see
+/// `config::UnlockConfig`).
+fn legacy_scheme_token_changes(node: &Arc<FactorTree>, token_changed: &mut HashSet<String>) {
+    match &node.variant {
+        FactorTreeVariant::And(children) => {
+            token_changed.insert(node.id.clone());
+            for child in children {
+                legacy_scheme_token_changes(child, token_changed);
+            }
+        },
+        FactorTreeVariant::Or(children) => {
+            for child in children {
+                legacy_scheme_token_changes(child, token_changed);
+            }
+        },
+        FactorTreeVariant::Password | FactorTreeVariant::RecoveryPhrase => {
+            token_changed.insert(node.id.clone());
+        },
+        FactorTreeVariant::Smartcards(_) => { },
+    }
+}
+
 #[tokio::main]
 async fn main() {
     match main2().await {
@@ -186,27 +257,64 @@ async fn main2() -> Result<(), loga::Error> {
     } else {
         loga::INFO
     });
-    let tm = TaskManager::new();
-    for domain in [None, Some("Gtk"), Some("GLib"), Some("Gdk")] {
-        gtk4::glib::log_set_handler(domain, LogLevels::all(), true, true, {
-            let log = log.clone();
-            move |domain, level, text| {
-                log.log_with(
-                    // Gdk et all log stuff as CRITICAL that's clearly not critical... ignore reported
-                    // levels
-                    loga::DEBUG,
-                    text,
-                    ea!(source = "gtk", level = level.dbg_str(), domain = domain.dbg_str()),
-                );
-            }
-        });
+
+    // This process holds every secret while unlocked; keep it out of core dumps (and
+    // off limits to same-uid ptrace). No memory cost.
+    if unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0)
+    } != 0 {
+        return Err(std::io::Error::last_os_error().context("Error marking process non-dumpable"));
     }
+
+    // Tags are keyed by pidfd inode. Before Linux 6.9 pidfds were anonymous inodes
+    // that all share one inode number, which would make every tagged process
+    // indistinguishable.
+    {
+        let (self_ino, _self_fd) =
+            pidfd(std::process::id() as i32).await.context("Error opening pidfd for self")?;
+        let (init_ino, _init_fd) = pidfd(1).await.context("Error opening pidfd for pid 1")?;
+        if self_ino == init_ino {
+            return Err(
+                loga::err(
+                    "This kernel does not give pidfds unique inodes (requires Linux 6.9 or newer); refusing to start since process tags would be unreliable",
+                ),
+            );
+        }
+    }
+
+    let tm = TaskManager::new();
 
     // Data prep + preprocessing
     let users = unsafe {
         UsersCache::with_all_users()
     };
     let rules = build_rule_tree(&users, &config.access)?;
+    let ui_config = {
+        let ui = config.ui.clone().unwrap_or_default();
+        let binary = match ui.binary {
+            Some(b) => b,
+            None => env::current_exe()
+                .context("Couldn't determine own executable path to locate passworth-ui")?
+                .parent()
+                .context("Own executable path has no parent directory")?
+                .join("passworth-ui"),
+        };
+        let run_as = match ui.user {
+            Some(u) => {
+                let user = match &u {
+                    config::latest::UserGroupId::Id(i) => users.get_user_by_uid(*i),
+                    config::latest::UserGroupId::Name(n) => users.get_user_by_name(n),
+                }.context("UI user specified in config not found in passwd")?;
+                Some((user.uid(), user.primary_group_id(), PathBuf::from(user.home_dir())))
+            },
+            None => None,
+        };
+        UiSpawnConfig {
+            binary: binary,
+            run_as: run_as,
+            env: ui.env,
+        }
+    };
     let root_factor =
         build_factor_tree(
             &HashSet::new(),
@@ -215,77 +323,34 @@ async fn main2() -> Result<(), loga::Error> {
             &config.unlock_config.root_factor,
         )?;
 
-    // Start fg thread
-    let (fg_tx, fg_rx) = tokio::sync::mpsc::channel(100);
+    // Start fg task - drives the separate UI helper process
+    let (fg_tx, mut fg_rx) = tokio::sync::mpsc::channel(100);
     tm.critical_task("Foreground interactions", {
+        let tm = tm.clone();
         let fg_state = Arc::new(FgState {
             log: log.fork(ea!(sys = "human")),
             last_prompts: Mutex::new(HashMap::new()),
+            ui_config: ui_config,
         });
-        let work = spawn_blocking({
-            let fg_state = fg_state.clone();
-            let tm = RefCell::new(Some(tm.clone()));
-            let fg_rx = RefCell::new(Some(fg_rx));
-            move || {
-                let app =
-                    gtk4::Application::builder()
-                        .application_id("x.passworth")
-                        .flags(gtk4::gio::ApplicationFlags::FLAGS_NONE)
-                        .build();
-                gtk4::gio::prelude::ApplicationExt::connect_activate(&app, {
-                    let fg_state = fg_state.clone();
-                    move |app| {
-                        let app = app.clone();
-
-                        // Hack to work around `connect_activate` being `Fn` instead of `FnOnce`
-                        let fg_state = fg_state.clone();
-                        let tm = tm.borrow_mut().take().unwrap();
-                        let mut fg_rx = fg_rx.borrow_mut().take().unwrap();
-
-                        // Start current-thread async task in gtk thread to read queue
-                        gtk4::glib::spawn_future_local({
-                            let hold = app.hold();
-                            let work = async move {
-                                let _hold = hold;
-                                while let Some(req) = fg_rx.recv().await {
-                                    match req {
-                                        B2F::Unlock(req, resp) => {
-                                            resp
-                                                .send(fg::do_unlock(fg_state.clone(), &app, Arc::new(req)).await)
-                                                .ignore();
-                                        },
-                                        B2F::Initialize(req, resp) => {
-                                            resp
-                                                .send(fg::do_initialize(fg_state.clone(), &app, Arc::new(req)).await)
-                                                .ignore();
-                                        },
-                                        B2F::Prompt(req, resp) => {
-                                            resp
-                                                .send(fg::do_prompt(fg_state.clone(), &app, Arc::new(req)).await)
-                                                .ignore();
-                                        },
-                                    }
-                                }
-                            };
-                            async move {
-                                select!{
-                                    _ = work =>(),
-                                    _ = tm.until_terminate() =>()
-                                };
-                            }
-                        });
-                    }
-                });
-                gtk4::prelude::ApplicationExtManual::run_with_args(&app, &[] as &[String]);
-            }
-        });
-        let tm = tm.clone();
         async move {
-            select!{
-                w = work => {
-                    w?;
-                },
-                _ = tm.until_terminate() => {
+            loop {
+                let req = select!{
+                    r = fg_rx.recv() => r,
+                    _ = tm.until_terminate() => break,
+                };
+                let Some(req) = req else {
+                    break;
+                };
+                match req {
+                    B2F::Unlock(req, resp) => {
+                        resp.send(fg::do_unlock(fg_state.clone(), Arc::new(req)).await).ignore();
+                    },
+                    B2F::Initialize(req, resp) => {
+                        resp.send(fg::do_initialize(fg_state.clone(), Arc::new(req)).await).ignore();
+                    },
+                    B2F::Prompt(req, resp) => {
+                        resp.send(fg::do_prompt(fg_state.clone(), Arc::new(req)).await).ignore();
+                    },
                 }
             }
             return Ok(());
@@ -293,18 +358,15 @@ async fn main2() -> Result<(), loga::Error> {
     });
 
     // Prep state for everything else
-    struct TokenState {
-        token: Option<String>,
-        wait_sub: Option<broadcast::Sender<String>>,
-    }
-
     struct State {
         fg_tx: tokio::sync::mpsc::Sender<B2F>,
         lock_timeout: u64,
         privdb_path: PathBuf,
         pubdb_path: PathBuf,
         root_factor: Arc<FactorTree>,
-        token_state: Mutex<TokenState>,
+        /// The open (unlocked) private database. `None` means locked. The key is not
+        /// retained anywhere once the database is open; locking drops the connection.
+        db: tokio::sync::Mutex<Option<rusqlite::Connection>>,
     }
 
     let data_path = match args.config.source {
@@ -324,15 +386,15 @@ async fn main2() -> Result<(), loga::Error> {
         pubdb_path: pubdb_path.clone(),
         root_factor: root_factor.clone(),
         fg_tx: fg_tx,
-        token_state: Mutex::new(TokenState {
-            token: None,
-            wait_sub: None,
-        }),
+        db: tokio::sync::Mutex::new(None),
         lock_timeout: config.lock_timeout,
     });
 
     // Initialize db, process config changes
-    let mut pubdbc = rusqlite::Connection::open(&pubdb_path).unwrap();
+    let mut pubdbc =
+        rusqlite::Connection::open(
+            &pubdb_path,
+        ).context_with("Error opening pub database", ea!(path = pubdb_path.to_string_lossy()))?;
     pubdb::migrate(
         &mut pubdbc,
     ).context_with("Error setting up pub database", ea!(path = pubdb_path.to_string_lossy()))?;
@@ -344,8 +406,9 @@ async fn main2() -> Result<(), loga::Error> {
         }
         if let Some(previous_config) =
             pubdb::config_get(&mut pubdbc).context("Error reading previous config for config migrations")? {
-            let previous_unlock_config = match previous_config {
-                config::UnlockConfig::V1(config) => config,
+            let (prev_scheme, previous_unlock_config) = match previous_config {
+                config::UnlockConfig::V1(config) => (TokenScheme::Legacy, config),
+                config::UnlockConfig::V2(config) => (TokenScheme::V2, config),
             };
 
             // Previous config existed
@@ -366,7 +429,7 @@ async fn main2() -> Result<(), loga::Error> {
                 let mut stack = vec![(&root_factor, Some(&prev_root_factor), true)];
                 let mut seen = HashSet::new();
                 while let Some((new, old, descending)) = stack.pop() {
-                    if !seen.insert(new.id.clone()) {
+                    if descending && !seen.insert(new.id.clone()) {
                         continue;
                     }
                     let old_variant = old.map(|x| &x.variant);
@@ -375,7 +438,7 @@ async fn main2() -> Result<(), loga::Error> {
                             if descending {
                                 stack.push((new, old, false));
                                 let mut old_lookup = HashMap::new();
-                                if let Some(FactorTreeVariant::Or(old_children)) = old_variant {
+                                if let Some(FactorTreeVariant::And(old_children)) = old_variant {
                                     for old_child in old_children {
                                         old_lookup.insert(old_child.id.clone(), old_child);
                                     }
@@ -384,13 +447,7 @@ async fn main2() -> Result<(), loga::Error> {
                                     stack.push((child, old_lookup.get(&child.id).map(|x| *x), true));
                                 }
                             } else {
-                                let mut changed = false;
-                                for child in children {
-                                    if factor_token_changed.contains(&child.id) {
-                                        changed = true;
-                                    }
-                                }
-                                if changed {
+                                if !matches!(old_variant, Some(FactorTreeVariant::And(_))) {
                                     factor_token_changed.insert(new.id.clone());
                                 }
                             }
@@ -408,23 +465,13 @@ async fn main2() -> Result<(), loga::Error> {
                                     stack.push((child, old_lookup.get(&child.id).map(|x| *x), true));
                                 }
                             } else {
-                                if matches!(old_variant, Some(FactorTreeVariant::Or(_))) {
-                                    // nop
-                                } else {
+                                if !matches!(old_variant, Some(FactorTreeVariant::Or(_))) {
                                     factor_token_changed.insert(new.id.clone());
-                                }
-                                for child in children {
-                                    if factor_token_changed.contains(&child.id) {
-                                        factor_state_changed.insert(new.id.clone());
-                                        break;
-                                    }
                                 }
                             }
                         },
                         FactorTreeVariant::Password => {
-                            if matches!(old_variant, Some(FactorTreeVariant::Password)) {
-                                // nop
-                            } else {
+                            if !matches!(old_variant, Some(FactorTreeVariant::Password)) {
                                 factor_token_changed.insert(new.id.clone());
                             }
                         },
@@ -445,9 +492,7 @@ async fn main2() -> Result<(), loga::Error> {
                             }
                         },
                         FactorTreeVariant::RecoveryPhrase => {
-                            if matches!(old_variant, Some(FactorTreeVariant::RecoveryPhrase)) {
-                                // nop
-                            } else {
+                            if !matches!(old_variant, Some(FactorTreeVariant::RecoveryPhrase)) {
                                 factor_token_changed.insert(new.id.clone());
                             }
                         },
@@ -455,9 +500,18 @@ async fn main2() -> Result<(), loga::Error> {
                 }
                 factor_active = seen;
             }
+            if prev_scheme == TokenScheme::Legacy {
+                log.log(
+                    loga::INFO,
+                    "Stored unlock data uses the legacy token scheme; the database will be re-keyed after unlocking",
+                );
+                legacy_scheme_token_changes(&root_factor, &mut factor_token_changed);
+            }
+            propagate_changes(&root_factor, &mut factor_token_changed, &mut factor_state_changed);
 
             // Skip if nothing changed
-            let root_token_changed = factor_token_changed.contains(&root_factor.id);
+            let root_token_changed =
+                prev_scheme == TokenScheme::Legacy || factor_token_changed.contains(&root_factor.id);
             if factor_state_changed.is_empty() && !root_token_changed {
                 break 'priv_init_done;
             }
@@ -470,7 +524,9 @@ async fn main2() -> Result<(), loga::Error> {
                 let (resp_tx, resp_rx) = oneshot::channel();
                 state.fg_tx.send(B2F::Unlock(B2FUnlock {
                     privdb_path: state.privdb_path.clone(),
+                    require_exists: false,
                     root_factor: prev_root_factor.clone(),
+                    scheme: prev_scheme,
                     state: prev_state.clone(),
                 }, resp_tx)).await.ignore();
                 unlock_result =
@@ -480,13 +536,13 @@ async fn main2() -> Result<(), loga::Error> {
             // Continue with init
             let (resp_tx, resp_rx) = oneshot::channel();
             state.fg_tx.send(B2F::Initialize(B2FInitialize {
-                privdbc: None,
                 root_factor: root_factor.clone(),
                 tokens_changed: factor_token_changed,
                 prev_tokens: unlock_result.tokens,
                 state_changed: factor_state_changed,
                 prev_state: prev_state,
                 prev_root_factor: Some(prev_root_factor),
+                prev_scheme: prev_scheme,
             }, resp_tx)).await.ignore();
             let init_result =
                 resp_rx
@@ -495,26 +551,27 @@ async fn main2() -> Result<(), loga::Error> {
                     .context("Credential initialization aborted by user")?;
 
             // Store the new config and tokens
-            tx(pubdbc, move |txn| {
+            let privdbc = unlock_result.privdbc;
+            let (_, res) = tx(pubdbc, move |txn| {
                 for k in &remove_state {
-                    if !pubdb::factor_delete(txn, k)
+                    if pubdb::factor_delete(txn, k)
                         .context_with("Error removing obsolete factor data", ea!(factor = k))?
-                        .is_some() {
-                        panic!();
+                        .is_none() {
+                        return Err(loga::err_with("Obsolete factor data vanished during update", ea!(factor = k)));
                     }
                 }
                 for (k, v) in &init_result.store_state {
                     pubdb::factor_add(txn, &k, &v).context_with("Error storing new factor data", ea!(factor = k))?;
                 }
-                pubdb::config_set(txn, &config::UnlockConfig::V1(config.unlock_config))?;
+                pubdb::config_set(txn, &config::UnlockConfig::V2(config.unlock_config))?;
                 if root_token_changed {
                     let Some(root_token) = init_result.root_token else {
-                        panic!();
+                        return Err(loga::err("Root token changed but initialization produced no new root token"));
                     };
                     let root_token = root_token.as_bytes();
                     let res = unsafe {
                         libsqlite3_sys::sqlite3_rekey(
-                            unlock_result.privdbc.handle(),
+                            privdbc.handle(),
                             root_token.as_ptr() as *const c_void,
                             root_token.len() as i32,
                         )
@@ -523,35 +580,50 @@ async fn main2() -> Result<(), loga::Error> {
                         return Err(loga::err_with("Sqlcipher rekey operation exited with code", ea!(code = res)));
                     }
                 }
-                return Ok(());
-            }).await.context("Error committing new unlock credentials")?;
+                return Ok(privdbc);
+            }).await;
+            let privdbc = res.context("Error committing new unlock credentials")?;
+
+            // Already unlocked, no need to prompt again
+            *state.db.lock().await = Some(privdbc);
         }
         else {
             let all_factors = config.unlock_config.auth_factors.iter().map(|x| x.id.clone()).collect::<HashSet<_>>();
             let (resp_tx, resp_rx) = oneshot::channel();
             state.fg_tx.send(B2F::Initialize(B2FInitialize {
-                privdbc: None,
                 root_factor: root_factor.clone(),
                 tokens_changed: all_factors.clone(),
                 prev_tokens: HashMap::new(),
                 state_changed: all_factors.clone(),
                 prev_state: HashMap::new(),
                 prev_root_factor: None,
+                prev_scheme: TokenScheme::V2,
             }, resp_tx)).await.ignore();
             let init_result =
                 resp_rx
                     .await?
                     .context("Error doing fg initialize")?
                     .context("Credential initialization aborted by user")?;
+            let Some(root_token) = init_result.root_token.clone() else {
+                return Err(loga::err("Initialization produced no root token"));
+            };
 
             // Store the new config and tokens
-            tx(pubdbc, move |txn| {
+            let (_, res) = tx(pubdbc, move |txn| {
                 for (k, v) in &init_result.store_state {
                     pubdb::factor_add(txn, &k, &v).context_with("Error storing new factor data", ea!(factor = k))?;
                 }
-                pubdb::config_set(txn, &config::UnlockConfig::V1(config.unlock_config))?;
+                pubdb::config_set(txn, &config::UnlockConfig::V2(config.unlock_config))?;
                 return Ok(());
-            }).await.context("Error committing new unlock credentials")?;
+            }).await;
+            res.context("Error committing new unlock credentials")?;
+
+            // Create the private database now so that later unlocks can insist it exists
+            let privdbc = spawn_blocking({
+                let privdb_path = state.privdb_path.clone();
+                move || open_privdb(&privdb_path, &root_token)
+            }).await.map_err(|e| loga::Error::from(e))?.context("Error creating private database")?;
+            *state.db.lock().await = Some(privdbc);
         }
     };
 
@@ -564,69 +636,39 @@ async fn main2() -> Result<(), loga::Error> {
         .map_err(loga::err)
         .context("Error setting mode on socket")?;
     tm.critical_task("Command processing", {
-        async fn get_privdb(state: &State) -> Result<rusqlite::Connection, loga::Error> {
-            enum Invert {
-                Missing {
-                    token_tx: broadcast::Sender<String>,
-                },
-                Ready {
-                    token: String,
-                },
-                Waiting {
-                    token_rx: broadcast::Receiver<String>,
-                },
-            }
-
-            let privdbc = match {
-                let mut token_state = state.token_state.lock().unwrap();
-                match &token_state.token {
-                    Some(t) => Invert::Ready { token: t.clone() },
-                    None => {
-                        match &token_state.wait_sub {
-                            Some(s) => {
-                                let token_rx = s.subscribe();
-                                Invert::Waiting { token_rx: token_rx }
-                            },
-                            None => {
-                                let (token_tx, _) = broadcast::channel(1);
-                                token_state.wait_sub = Some(token_tx.clone());
-                                Invert::Missing { token_tx: token_tx }
-                            },
-                        }
-                    },
+        /// Run `f` in a transaction on the private database, unlocking first (via the
+        /// UI) if it's locked. Requests are serialized on the database.
+        async fn with_db<
+            T: 'static + Send,
+        >(
+            state: &State,
+            f: impl 'static + Send + FnOnce(&mut rusqlite::Transaction) -> Result<T, loga::Error>,
+        ) -> Result<T, loga::Error> {
+            let mut guard = state.db.lock().await;
+            if guard.is_none() {
+                // Unlock
+                let mut pubdbc =
+                    rusqlite::Connection::open(&state.pubdb_path).context("Error opening public database")?;
+                let mut factor_state = HashMap::new();
+                for t in pubdb::factor_list(&mut pubdbc)? {
+                    factor_state.insert(t.id, t.state);
                 }
-            } {
-                Invert::Ready { token } => {
-                    open_privdb(&state.privdb_path, &token)?
-                },
-                Invert::Waiting { mut token_rx } => {
-                    open_privdb(&state.privdb_path, &token_rx.recv().await?)?
-                },
-                Invert::Missing { token_tx } => {
-                    // Unlock
-                    let mut pubdbc = rusqlite::Connection::open(&state.pubdb_path).unwrap();
-                    let mut factor_state = HashMap::new();
-                    for t in pubdb::factor_list(&mut pubdbc)? {
-                        factor_state.insert(t.id, t.state);
-                    }
-                    let (fg_result_tx, fg_result_rx) = oneshot::channel();
-                    state.fg_tx.send(B2F::Unlock(B2FUnlock {
-                        privdb_path: state.privdb_path.clone(),
-                        root_factor: state.root_factor.clone(),
-                        state: factor_state,
-                    }, fg_result_tx)).await.ignore();
-                    let res = fg_result_rx.await;
-
-                    // Handle result
-                    let mut token = state.token_state.lock().unwrap();
-                    token.wait_sub = None;
-                    let res = res?.context("Error during fg unlock")?.context("User closed unlock window")?;
-                    token.token = Some(res.root_token.clone());
-                    token_tx.send(res.root_token.clone()).ignore();
-                    res.privdbc
-                },
-            };
-            return Ok(privdbc);
+                let (fg_result_tx, fg_result_rx) = oneshot::channel();
+                state.fg_tx.send(B2F::Unlock(B2FUnlock {
+                    privdb_path: state.privdb_path.clone(),
+                    require_exists: true,
+                    root_factor: state.root_factor.clone(),
+                    scheme: TokenScheme::V2,
+                    state: factor_state,
+                }, fg_result_tx)).await.ignore();
+                let res =
+                    fg_result_rx.await?.context("Error during fg unlock")?.context("User closed unlock window")?;
+                *guard = Some(res.privdbc);
+            }
+            let conn = guard.take().unwrap();
+            let (conn, res) = tx(conn, f).await;
+            *guard = conn;
+            return res;
         }
 
         let tm = tm.clone();
@@ -664,30 +706,23 @@ async fn main2() -> Result<(), loga::Error> {
                         // Helpers for command processing
                         fn set(txn: &mut rusqlite::Transaction, pairs: Vec<(SpecificPath, serde_json::Value)>) -> Result<(), loga::Error> {
                             let now = Utc::now();
+                            let null = serde_json::to_string(&serde_json::Value::Null).unwrap();
                             for (mut path, value) in pairs {
                                 // Clear out everything above and below that would be shaded by this
-                                if !path.0.is_empty() {
-                                    for i in 0 .. path.0.len() - 1 {
-                                        // If setting at `/a/b/c = { .. }` and a value exists at e.g. `/a = 4`
-                                        let parent_path = SpecificPath(path.0[..i].iter().cloned().collect()).to_string();
-                                        if privdb::values_get_exact(txn, &parent_path, i64::MAX)?
-                                            .filter(
-                                                |x| serde_json::from_str::<serde_json::Value>(&x.data).unwrap() !=
-                                                    serde_json::Value::Null,
-                                            )
-                                            .is_some() {
-                                            privdb::values_insert(
-                                                txn,
-                                                now,
-                                                &parent_path,
-                                                &serde_json::to_string(&serde_json::Value::Null).unwrap(),
-                                            )?;
+                                for i in 0 .. path.0.len() {
+                                    // If setting at `/a/b/c = { .. }` and a value exists at e.g. `/a = 4`
+                                    let parent_path = SpecificPath(path.0[..i].iter().cloned().collect()).to_string();
+                                    if let Some(existing) = privdb::values_get_exact(txn, &parent_path, i64::MAX)? {
+                                        if parse_row_data(&existing.data)? != serde_json::Value::Null {
+                                            privdb::values_insert(txn, now, &parent_path, &null)?;
                                         }
                                     }
                                 }
                                 for row in privdb::values_get(txn, &path.to_string(), i64::MAX)? {
                                     // If setting at `/a/b/c` and a value exists at e.g. `/a/b/c/d`
-                                    privdb::values_insert(txn, now, &row.path, &serde_json::to_string(&serde_json::Value::Null).unwrap())?;
+                                    if parse_row_data(&row.data)? != serde_json::Value::Null {
+                                        privdb::values_insert(txn, now, &row.path, &null)?;
+                                    }
                                 }
 
                                 // Add the new data
@@ -730,19 +765,28 @@ async fn main2() -> Result<(), loga::Error> {
                         ) -> Result<serde_json::Value, loga::Error> {
                             let mut root = serde_json::Value::Null;
                             for row in privdb::values_get(txn, &path.to_string(), at.unwrap_or(i64::MAX))? {
-                                let data = serde_json::from_str::<serde_json::Value>(&row.data).unwrap();
+                                let data = parse_row_data(&row.data)?;
                                 if data == serde_json::Value::Null {
                                     continue;
                                 }
                                 bury(
                                     &mut root,
-                                    &SpecificPath(
-                                        SpecificPath::from_str(&row.path).unwrap().0.split_off(path.0.len()),
-                                    ),
+                                    &SpecificPath(parse_row_path(&row.path)?.0.split_off(path.0.len())),
                                     data,
                                 );
                             }
                             return Ok(root);
+                        }
+
+                        /// Get the string value at a path, for keys/urls/etc.
+                        fn get_string(
+                            txn: &mut rusqlite::Transaction,
+                            path: &SpecificPath,
+                        ) -> Result<String, loga::Error> {
+                            let serde_json::Value::String(s) = get(txn, path, None)? else {
+                                return Err(loga::err("No value at path or value is not a string"));
+                            };
+                            return Ok(s);
                         }
 
                         // Process request
@@ -767,10 +811,13 @@ async fn main2() -> Result<(), loga::Error> {
                                 let resp;
                                 match req {
                                     ipc::msg::ServerReq::Tag(rr, req) => {
-                                        eprintln!("DEBUG tagging {} with {:?}", pid, req.0);
                                         let (pidfd_inode, pidfd) =
                                             pidfd(pid).await.context("Error resolving pidfd of peer")?;
-                                        eprintln!("Tagging inode {}", pidfd_inode.0);
+                                        log.log_with(
+                                            loga::DEBUG,
+                                            "Tagging process",
+                                            ea!(pid = pid, inode = pidfd_inode.0, tags = req.0.dbg_str()),
+                                        );
                                         tags.lock().unwrap().insert(pidfd_inode, req.0.into_iter().collect());
                                         spawn({
                                             let log = log.clone();
@@ -792,7 +839,11 @@ async fn main2() -> Result<(), loga::Error> {
                                                             None
                                                         },
                                                     };
-                                                eprintln!("Untagging inode {}", pidfd_inode.0);
+                                                log.log_with(
+                                                    loga::DEBUG,
+                                                    "Tagged process exited, untagging",
+                                                    ea!(pid = pid, inode = pidfd_inode.0),
+                                                );
                                                 tags.lock().unwrap().remove(&pidfd_inode);
                                             }
                                         });
@@ -812,10 +863,10 @@ async fn main2() -> Result<(), loga::Error> {
                                         }
                                         match req.0 {
                                             ipc::LockAction::Lock => {
-                                                state.token_state.lock().unwrap().token = None;
+                                                *state.db.lock().await = None;
                                             },
                                             ipc::LockAction::Unlock => {
-                                                get_privdb(&state).await?;
+                                                with_db(&state, |_| Ok(())).await?;
                                                 activity.notify_one();
                                             },
                                         }
@@ -833,7 +884,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             .meta {
                                             return resp_unauthorized();
                                         }
-                                        let tree = tx(get_privdb(&state).await?, move |txn| {
+                                        let tree = with_db(&state, move |txn| {
                                             let mut root0 = serde_json::Value::Null;
                                             for path in &req.paths {
                                                 let mut root = serde_json::Value::Null;
@@ -842,20 +893,14 @@ async fn main2() -> Result<(), loga::Error> {
                                                     &path.to_string(),
                                                     req.at.unwrap_or(i64::MAX),
                                                 )? {
-                                                    let data =
-                                                        serde_json::from_str::<serde_json::Value>(
-                                                            &row.data,
-                                                        ).unwrap();
+                                                    let data = parse_row_data(&row.data)?;
                                                     if data == serde_json::Value::Null {
                                                         continue;
                                                     }
                                                     bury(
                                                         &mut root,
                                                         &SpecificPath(
-                                                            SpecificPath::from_str(&row.path)
-                                                                .unwrap()
-                                                                .0
-                                                                .split_off(path.0.len()),
+                                                            parse_row_path(&row.path)?.0.split_off(path.0.len()),
                                                         ),
                                                         serde_json::Value::Null,
                                                     );
@@ -879,24 +924,19 @@ async fn main2() -> Result<(), loga::Error> {
                                             .meta {
                                             return resp_unauthorized();
                                         }
-                                        let mut privdbc = get_privdb(&state).await?;
-                                        let db_resp = spawn_blocking(move || {
+                                        let db_resp = with_db(&state, move |txn| {
                                             let mut root = serde_json::Value::Null;
                                             for path in req.paths {
                                                 for row in privdb::values_get(
-                                                    &mut privdbc,
+                                                    txn,
                                                     &path.to_string(),
-                                                    req.at.map(|x| x as i64).unwrap_or(i64::MAX),
+                                                    req.at.unwrap_or(i64::MAX),
                                                 )? {
-                                                    let data =
-                                                        serde_json::from_str::<serde_json::Value>(
-                                                            &row.data,
-                                                        ).unwrap();
+                                                    let data = parse_row_data(&row.data)?;
                                                     bury(
                                                         &mut root,
                                                         &SpecificPath(
-                                                            SpecificPath::from_str(&row.path)
-                                                                .unwrap()
+                                                            parse_row_path(&row.path)?
                                                                 .0
                                                                 .into_iter()
                                                                 .flat_map(|x| ["children".to_string(), x])
@@ -910,8 +950,8 @@ async fn main2() -> Result<(), loga::Error> {
                                                     );
                                                 }
                                             }
-                                            return Ok(root) as Result<_, loga::Error>;
-                                        }).await.map_err(|e| loga::Error::from(e))??;
+                                            return Ok(root);
+                                        }).await?;
                                         activity.notify_one();
                                         resp = rr(db_resp);
                                     },
@@ -927,14 +967,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             .meta {
                                             return resp_unauthorized();
                                         }
-                                        let db_key = tx(get_privdb(&state).await?, move |txn| {
-                                            return Ok(get(txn, &req.path, None)?);
-                                        }).await?;
-                                        let serde_json::Value::String(key) = db_key else {
-                                            return Err(
-                                                loga::err("No value at path or value is not a string").into(),
-                                            );
-                                        };
+                                        let key = with_db(&state, move |txn| get_string(txn, &req.path)).await?;
                                         resp =
                                             rr(
                                                 String::from_utf8(
@@ -959,14 +992,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             .meta {
                                             return resp_unauthorized();
                                         }
-                                        let db_key = tx(get_privdb(&state).await?, move |txn| {
-                                            return Ok(get(txn, &req.path, None)?);
-                                        }).await?;
-                                        let serde_json::Value::String(key) = db_key else {
-                                            return Err(
-                                                loga::err("No value at path or value is not a string").into(),
-                                            );
-                                        };
+                                        let key = with_db(&state, move |txn| get_string(txn, &req.path)).await?;
                                         resp =
                                             rr(
                                                 ssh_key::PrivateKey::from_openssh(&key)
@@ -989,7 +1015,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             .read {
                                             return resp_unauthorized();
                                         }
-                                        let tree = tx(get_privdb(&state).await?, move |txn| {
+                                        let tree = with_db(&state, move |txn| {
                                             let mut root = serde_json::Value::Null;
                                             for path in &req.paths {
                                                 bury(&mut root, &path, get(txn, path, req.at)?);
@@ -1011,7 +1037,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             .write {
                                             return resp_unauthorized();
                                         }
-                                        tx(get_privdb(&state).await?, move |txn| {
+                                        with_db(&state, move |txn| {
                                             set(txn, req.0)?;
                                             return Ok(());
                                         }).await?;
@@ -1030,7 +1056,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             .write {
                                             return resp_unauthorized();
                                         }
-                                        tx(get_privdb(&state).await?, move |txn| {
+                                        with_db(&state, move |txn| {
                                             if get(txn, &req.to, None)? != serde_json::Value::Null && !req.overwrite {
                                                 return Err(
                                                     loga::err(
@@ -1057,7 +1083,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             .write {
                                             return resp_unauthorized();
                                         }
-                                        tx(get_privdb(&state).await?, move |txn| {
+                                        with_db(&state, move |txn| {
                                             if get(txn, &req.path, None)? != serde_json::Value::Null &&
                                                 !req.overwrite {
                                                 return Err(
@@ -1107,37 +1133,26 @@ async fn main2() -> Result<(), loga::Error> {
                                                             .generate()
                                                             .map_err(|e| loga::err(e.to_string()))
                                                             .context("Error generating pgp cert")?;
-                                                    {
-                                                        let mut bytes = Vec::new();
-                                                        sequoia_openpgp::serialize::Serialize::serialize(
-                                                            &cert.armored(),
-                                                            &mut bytes,
-                                                        )
-                                                            .map_err(|e| loga::err(e.to_string()))
-                                                            .context("Error serializing public key")?;
-                                                    }
-                                                    {
-                                                        let mut w =
-                                                            sequoia_openpgp::armor::Writer::with_headers(
-                                                                vec![],
-                                                                sequoia_openpgp::armor::Kind::SecretKey,
-                                                                cert
-                                                                    .armor_headers()
-                                                                    .iter()
-                                                                    .map(|value| ("Comment", value.as_str()))
-                                                                    .collect::<Vec<_>>(),
-                                                            )?;
-                                                        sequoia_openpgp::serialize::Serialize::serialize(
-                                                            &cert.as_tsk().armored(),
-                                                            &mut w,
-                                                        )
-                                                            .map_err(|e| loga::err(e.to_string()))
-                                                            .context("Error serializing private key")?;
-                                                        data =
-                                                            serde_json::Value::String(
-                                                                String::from_utf8(w.finalize()?).unwrap(),
-                                                            );
-                                                    }
+                                                    let mut w =
+                                                        sequoia_openpgp::armor::Writer::with_headers(
+                                                            vec![],
+                                                            sequoia_openpgp::armor::Kind::SecretKey,
+                                                            cert
+                                                                .armor_headers()
+                                                                .iter()
+                                                                .map(|value| ("Comment", value.as_str()))
+                                                                .collect::<Vec<_>>(),
+                                                        )?;
+                                                    sequoia_openpgp::serialize::Serialize::serialize(
+                                                        &cert.as_tsk().armored(),
+                                                        &mut w,
+                                                    )
+                                                        .map_err(|e| loga::err(e.to_string()))
+                                                        .context("Error serializing private key")?;
+                                                    data =
+                                                        serde_json::Value::String(
+                                                            String::from_utf8(w.finalize()?).unwrap(),
+                                                        );
                                                 },
                                                 ipc::C2SGenerateVariant::Ssh => {
                                                     let key =
@@ -1174,7 +1189,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             .write {
                                             return resp_unauthorized();
                                         }
-                                        tx(get_privdb(&state).await?, move |txn| {
+                                        with_db(&state, move |txn| {
                                             for path in req.paths {
                                                 let data = get(txn, &path, Some(req.at))?;
                                                 set(txn, vec![(path, data)])?;
@@ -1196,14 +1211,7 @@ async fn main2() -> Result<(), loga::Error> {
                                             .derive {
                                             return resp_unauthorized();
                                         }
-                                        let db_key = tx(get_privdb(&state).await?, move |txn| {
-                                            return Ok(get(txn, &req.key, None)?);
-                                        }).await?;
-                                        let serde_json::Value::String(key) = db_key else {
-                                            return Err(
-                                                loga::err("No value at path or value is not a string").into(),
-                                            );
-                                        };
+                                        let key = with_db(&state, move |txn| get_string(txn, &req.key)).await?;
                                         let mut signed = vec![];
                                         let mut signer =
                                             Signer::with_template(
@@ -1215,7 +1223,7 @@ async fn main2() -> Result<(), loga::Error> {
                                                     .supported()
                                                     .for_signing()
                                                     .nth(0)
-                                                    .unwrap()
+                                                    .context("Pgp cert at path has no usable signing key")?
                                                     .key()
                                                     .clone()
                                                     .into_keypair()
@@ -1265,33 +1273,10 @@ async fn main2() -> Result<(), loga::Error> {
                                             .derive {
                                             return resp_unauthorized();
                                         }
-                                        let db_key = tx(get_privdb(&state).await?, move |txn| {
-                                            return Ok(get(txn, &req.key, None)?);
-                                        }).await?;
-                                        let serde_json::Value::String(key) = db_key else {
-                                            return Err(
-                                                loga::err("No value at path or value is not a string").into(),
-                                            );
-                                        };
+                                        let key = with_db(&state, move |txn| get_string(txn, &req.key)).await?;
                                         let mut decrypted = vec![];
 
-                                        struct Helper(Cert);
-
-                                        impl Helper {
-                                            fn secret_key(&self) -> Key<SecretParts, UnspecifiedRole> {
-                                                return self
-                                                    .0
-                                                    .keys()
-                                                    .secret()
-                                                    .with_policy(&StandardPolicy::new(), None)
-                                                    .supported()
-                                                    .for_storage_encryption()
-                                                    .nth(0)
-                                                    .unwrap()
-                                                    .key()
-                                                    .clone();
-                                            }
-                                        }
+                                        struct Helper(Cert, Key<SecretParts, UnspecifiedRole>);
 
                                         impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
                                             fn check(
@@ -1305,7 +1290,7 @@ async fn main2() -> Result<(), loga::Error> {
                                                 &mut self,
                                                 ids: &[sequoia_openpgp::KeyHandle],
                                             ) -> sequoia_openpgp::Result<Vec<Cert>> {
-                                                let own_id = self.secret_key().key_handle();
+                                                let own_id = self.1.key_handle();
                                                 for id in ids {
                                                     if id.aliases(&own_id) {
                                                         return Ok(vec![self.0.clone()]);
@@ -1331,7 +1316,7 @@ async fn main2() -> Result<(), loga::Error> {
                                                         sequoia_openpgp::types::SymmetricAlgorithm,
                                                         &sequoia_openpgp::crypto::SessionKey,
                                                     ) -> bool {
-                                                let mut keypair = self.secret_key().into_keypair()?;
+                                                let mut keypair = self.1.clone().into_keypair()?;
                                                 for pkesk in pkesks {
                                                     let Some((sym_algo, sk)) =
                                                         pkesk.decrypt(&mut keypair, sym_algo) else {
@@ -1346,11 +1331,23 @@ async fn main2() -> Result<(), loga::Error> {
                                         }
 
                                         let policy = StandardPolicy::new();
+                                        let cert = pgp_from_armor(&key)?;
+                                        let secret_key =
+                                            cert
+                                                .keys()
+                                                .secret()
+                                                .with_policy(&policy, None)
+                                                .supported()
+                                                .for_storage_encryption()
+                                                .nth(0)
+                                                .context("Pgp cert at path has no usable storage encryption key")?
+                                                .key()
+                                                .clone();
                                         let mut decryptor =
                                             DecryptorBuilder::from_bytes(&req.data)
                                                 .map_err(loga::err)
                                                 .context("Error creating decryptor from data to decrypt")?
-                                                .with_policy(&policy, None, Helper(pgp_from_armor(&key)?))
+                                                .with_policy(&policy, None, Helper(cert, secret_key))
                                                 .map_err(loga::err)
                                                 .context("Error matching cert to data to decrypt")?;
                                         std::io::copy(&mut decryptor, &mut Cursor::new(&mut decrypted))
@@ -1371,19 +1368,13 @@ async fn main2() -> Result<(), loga::Error> {
                                             .derive {
                                             return resp_unauthorized();
                                         }
-                                        let otp_url = tx(get_privdb(&state).await?, move |txn| {
-                                            return Ok(get(txn, &req.key, None)?);
-                                        }).await?;
-                                        let serde_json::Value::String(otp_url) = otp_url else {
-                                            return Err(
-                                                loga::err("No value at path or value is not a string").into(),
-                                            );
-                                        };
+                                        let otp_url = with_db(&state, move |txn| get_string(txn, &req.key)).await?;
                                         let otp =
                                             totp_rs::TOTP::from_url_unchecked(
                                                 &otp_url,
                                             ).context("Failed to parse OTP url at path")?;
                                         let token = otp.generate_current().context("Error generating OTP token")?;
+                                        activity.notify_one();
                                         resp = rr(token);
                                     },
                                 }
@@ -1439,7 +1430,7 @@ async fn main2() -> Result<(), loga::Error> {
                     },
                     if next.is_some() => {
                         log.log(loga::DEBUG, "Activity timeout, locking");
-                        state.token_state.lock().unwrap().token = None;
+                        *state.db.lock().await = None;
                     }
                 }
             }

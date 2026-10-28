@@ -28,6 +28,23 @@ pub struct ValueRow {
     pub rev_stamp: DateTime<Utc>,
 }
 
+/// Escape a literal string for use in a sqlite `LIKE` pattern with `escape '\'`.
+/// Without this, `%` and `_` in path segments act as wildcards, which both returns
+/// unrelated siblings on read and tombstones them on write.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(c);
+            },
+            c => out.push(c),
+        }
+    }
+    return out;
+}
+
 pub fn values_get<C: SqliteConnection>(db: &mut C, path: &str, at: i64) -> Result<Vec<ValueRow>, GoodError> {
     let mut db = dbm::DbPrivdb(db);
     let rows = good_ormning::sqlite::good_query_many!(
@@ -44,9 +61,9 @@ pub fn values_get<C: SqliteConnection>(db: &mut C, path: &str, at: i64) -> Resul
            where
              (
                "values"."path" = ?1
-               or "values"."path" like(?1 || '/%')
+               or "values"."path" like(?2 || '/%') escape '\'
              )
-             and "values"."rowid" <= ?2
+             and "values"."rowid" <= ?3
            group by
              "values"."path"
            order by
@@ -54,7 +71,8 @@ pub fn values_get<C: SqliteConnection>(db: &mut C, path: &str, at: i64) -> Resul
            "#;
         &mut db,
         p1: string = path,
-        p2: i64 = at
+        p2: string = &like_escape(path),
+        p3: i64 = at
     )?;
     Ok(rows.into_iter().map(|r| ValueRow {
         rev_id: r.rev_id.unwrap_or(0),
@@ -110,4 +128,15 @@ pub fn values_insert<
         p2: string = path,
         p3: string = value
     )
+}
+
+#[cfg(test)]
+mod test {
+    use super::like_escape;
+
+    #[test]
+    fn test_like_escape() {
+        assert_eq!(like_escape("/web/my_site/100%"), "/web/my\\_site/100\\%");
+        assert_eq!(like_escape("/a\\/b"), "/a\\\\/b");
+    }
 }

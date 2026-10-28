@@ -328,7 +328,11 @@ pub async fn permit(
     }
     if let Some(prompt) = total_prompt {
         let (resp_tx, resp_rx) = oneshot::channel();
-        fg_tx.send(B2F::Prompt(B2FPrompt { prompt_rules: prompt.rules.clone() }, resp_tx)).await?;
+        fg_tx.send(B2F::Prompt(B2FPrompt {
+            prompt_rules: prompt.rules.clone(),
+            principal: principal.describe(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+        }, resp_tx)).await?;
         match resp_rx.await.unwrap() {
             Ok(Some(b)) => {
                 if !b {
@@ -363,6 +367,21 @@ pub struct Perms {
 pub struct PrincipalMeta {
     /// Starts at process, then first parent, then 2nd, etc.
     chain: Vec<PrincipalMetaProc>,
+}
+
+impl PrincipalMeta {
+    /// Short human-readable description of the requesting process, for prompts.
+    pub fn describe(&self) -> String {
+        let Some(p) = self.chain.first() else {
+            return "unknown process".to_string();
+        };
+        return format!(
+            "pid {} uid {} {}",
+            p.pid,
+            p.uid.map(|x| x.to_string()).unwrap_or_else(|| "?".to_string()),
+            p.binary.as_ref().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "(unknown binary)".to_string())
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -498,9 +517,17 @@ pub async fn scan_principal(
         // Build meta chain entry
         /// Ensure that a path refers to an absolute path in the root filesystem (not a
         /// chroot'd different file).
+        ///
+        /// `proc_related_path` is the path as reported by the process (e.g. the `exe`
+        /// link target or an argument). `proc_side_path` is a path through `/proc/PID`
+        /// that resolves to the file the process actually sees (`/proc/PID/exe` itself,
+        /// or `/proc/PID/root/...`). The file at the reported path in the server's root
+        /// must be the same inode on the same device as the file the process sees;
+        /// comparing only the device would let a container on the same filesystem
+        /// substitute its own file at a trusted path.
         async fn verify_root_path(
-            procdir_path: PathBuf,
             proc_related_path: PathBuf,
+            proc_side_path: impl FnOnce(&Path) -> PathBuf,
         ) -> Result<Option<PathBuf>, loga::Error> {
             let Ok(root_path) = proc_related_path.canonicalize() else {
                 return Ok(None);
@@ -517,8 +544,8 @@ pub async fn scan_principal(
                 },
             };
             let rel_path = root_path.strip_prefix(Path::new("/")).unwrap_or(&root_path);
-            let procroot_path = procdir_path.join("root").join(rel_path);
-            let procroot_meta = match tokio::fs::metadata(&procroot_path).await {
+            let proc_side_path = proc_side_path(rel_path);
+            let proc_side_meta = match tokio::fs::metadata(&proc_side_path).await {
                 Ok(x) => x,
                 Err(e) => {
                     if e.kind() == ErrorKind::NotFound {
@@ -527,7 +554,7 @@ pub async fn scan_principal(
                     return Err(
                         e.context_with(
                             "Error reading related path meta within proc mount",
-                            ea!(path = rel_path.dbg_str()),
+                            ea!(path = proc_side_path.dbg_str()),
                         ),
                     );
                 },
@@ -535,7 +562,7 @@ pub async fn scan_principal(
 
             // Permissions are based on binaries in root namespace; confirm binary is the same
             // as the one on root or else treat as unknown
-            if root_meta.dev() == procroot_meta.dev() {
+            if root_meta.dev() == proc_side_meta.dev() && root_meta.ino() == proc_side_meta.ino() {
                 return Ok(Some(proc_related_path));
             } else {
                 return Ok(None);
@@ -544,7 +571,6 @@ pub async fn scan_principal(
 
         let binary = spawn({
             let exe_path = proc_path.join("exe");
-            let proc_path = proc_path.clone();
             let log = log.clone();
             async move {
                 match async {
@@ -553,7 +579,8 @@ pub async fn scan_principal(
                         read_link(&exe_path)
                             .await
                             .context_with("Unable to read proc exe link", ea!(path = exe_path.dbg_str()))?;
-                    return Ok(verify_root_path(proc_path, exe_rel).await?);
+                    // Stat'ing the `exe` magic link gives the actual running binary
+                    return Ok(verify_root_path(exe_rel, |_| exe_path).await?);
                 }.await {
                     Ok(x) => x,
                     Err(e) => {
@@ -578,15 +605,15 @@ pub async fn scan_principal(
                     let Some(arg_1) = arg_1 else {
                         return Ok(None);
                     };
-                    let arg_1_path = PathBuf::try_from(OsStr::from_bytes(arg_1)).unwrap();
+                    let arg_1_path = PathBuf::from(OsStr::from_bytes(arg_1));
                     if !arg_1_path.is_absolute() {
                         return Ok(None);
                     }
-                    return Ok(verify_root_path(proc_path, arg_1_path).await?);
+                    return Ok(verify_root_path(arg_1_path, move |rel| proc_path.join("root").join(rel)).await?);
                 }.await {
                     Ok(x) => x,
                     Err(e) => {
-                        log.log_err(loga::WARN, e.context("Unable to read proc exe link"));
+                        log.log_err(loga::WARN, e.context("Unable to read proc cmdline"));
                         None
                     },
                 }

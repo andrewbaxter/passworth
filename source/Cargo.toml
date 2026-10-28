@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["native", "native-ui", "native-no-systemd", "shared", "shared-native"]
+
+# Until the read_framed fix in glove is released (see readme). Resolved relative to
+# this file: a sibling checkout of the glove repository on `fix-read-framed-0.4`.
+[patch.crates-io]
+glove = { path = "../../glove" }

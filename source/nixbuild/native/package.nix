@@ -4,13 +4,10 @@ let
     pkgs = pkgs;
     lib = lib;
   };
-  workspace = rust.stageWorkspace "passworth-native" [
-    ./Cargo.toml
-    ../../native/Cargo.lock
-    ../../native
-    ../../shared
-    ../../shared-native
-  ];
+  workspace = import ../workspace.nix {
+    pkgs = pkgs;
+    lib = lib;
+  };
   layershell = pkgs.gtk4-layer-shell.overrideAttrs (old: {
     name = "gtk4-layer-shell-override";
     src = pkgs.fetchFromGitHub {
@@ -26,8 +23,10 @@ let
 in
 rust.naersk.buildPackage {
   pname = "passworth-native";
-  src = workspace;
+  src = "${workspace}/passworth";
   release = false;
+  cargoBuildOptions = x: x ++ [ "-p" "passworth-native" "-p" "passworth-native-ui" ];
+  cargoTestOptions = x: x ++ [ "-p" "passworth-native" "-p" "passworth-native-ui" ];
   nativeBuildInputs = [
     pkgs.pkg-config
     pkgs.rustPlatform.bindgenHook
@@ -69,6 +68,7 @@ rust.naersk.buildPackage {
       rm $out/bin/generate_jsonschema
       wrapProgram $out/bin/passworth-server --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
       wrapProgram $out/bin/passworth --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
+      wrapProgram $out/bin/passworth-ui --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath libs}
       (cd $out/bin; ln -s passworth pw)
       installShellCompletion --cmd pw --bash ${./complete_pw.bash} --zsh ${./complete_pw.zsh}
       installShellCompletion --cmd passworth --bash ${./complete_pw.bash} --zsh ${./complete_pw.zsh}

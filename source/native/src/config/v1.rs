@@ -18,8 +18,31 @@ pub struct Config {
     pub data_path: PathBuf,
     /// Lock if no successful activity for this many seconds.
     pub lock_timeout: u64,
+    /// How to run the `passworth-ui` helper that shows unlock and prompt windows.
+    #[serde(default)]
+    pub ui: Option<ConfigUi>,
     #[serde(flatten)]
     pub unlock_config: UnlockFactorsConfig,
+}
+
+/// The GTK user interface runs in a separate helper process (`passworth-ui`) which
+/// never sees the database or derived keys, only what the user types.
+#[derive(Serialize, Deserialize, Clone, Default, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConfigUi {
+    /// Path to the `passworth-ui` binary. Defaults to `passworth-ui` next to the
+    /// server binary.
+    #[serde(default)]
+    pub binary: Option<PathBuf>,
+    /// Extra environment variables for the helper, e.g. `WAYLAND_DISPLAY`. The
+    /// server's own environment is passed through as well.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    /// Run the helper as this user (requires the server to run as root). `HOME` is set
+    /// from passwd and `XDG_RUNTIME_DIR` to `/run/user/UID` unless overridden in `env`.
+    /// Recommended when the server runs as root and the desktop session does not.
+    #[serde(default)]
+    pub user: Option<UserGroupId>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]

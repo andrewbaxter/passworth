@@ -416,3 +416,87 @@ fn test_local_crypt() {
     let decrypted = local_decrypt(key, &encrypted).expect("Must not have parse errors").expect("Must decrypt");
     assert_eq!(String::from_utf8(body.to_vec()).unwrap(), String::from_utf8(decrypted).unwrap());
 }
+
+/// Which token derivation scheme a factor tree's tokens and stored state use. See
+/// `config::UnlockConfig` for the differences. New state is always produced with
+/// `V2`; `Legacy` only exists so old databases can be unlocked and re-keyed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TokenScheme {
+    Legacy,
+    V2,
+}
+
+pub const TOKEN_LEN: usize = 32;
+pub const KDF_SALT_LEN: usize = 16;
+
+/// Stretch user-entered secret material (a password or recovery phrase) into a fixed
+/// size token using argon2id. Parameters are above the OWASP minimum; memory use is
+/// transient and only during unlock.
+pub fn kdf_token(secret: &[u8], salt: &[u8]) -> Result<Vec<u8>, loga::Error> {
+    let params =
+        argon2::Params::new(64 * 1024, 3, 1, Some(TOKEN_LEN))
+            .map_err(|e| loga::err(e.to_string()))
+            .context("Error building kdf parameters")?;
+    let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut out = vec![0u8; TOKEN_LEN];
+    argon
+        .hash_password_into(secret, salt, &mut out)
+        .map_err(|e| loga::err(e.to_string()))
+        .context("Error deriving token from secret")?;
+    return Ok(out);
+}
+
+/// Combine child tokens for an `and` factor.
+pub fn and_token(scheme: TokenScheme, children: &[&[u8]]) -> Vec<u8> {
+    match scheme {
+        TokenScheme::Legacy => {
+            let mut token = vec![];
+            for child in children {
+                token.extend_from_slice(child);
+            }
+            return token;
+        },
+        TokenScheme::V2 => {
+            let mut hasher = Sha256::new();
+            for child in children {
+                hasher.update((child.len() as u64).to_le_bytes());
+                hasher.update(child);
+            }
+            return hasher.finalize().to_vec();
+        },
+    }
+}
+
+/// Turn the root token into the sqlcipher key string.
+pub fn db_key(scheme: TokenScheme, root_token: &[u8]) -> String {
+    match scheme {
+        TokenScheme::Legacy => {
+            // Passphrase; sqlcipher runs pbkdf2 on it
+            return zbase32::encode_full_bytes(root_token);
+        },
+        TokenScheme::V2 => {
+            // Raw key; all V2 root tokens are already uniformly random or kdf-stretched
+            // 32 byte values, so skip sqlcipher's pbkdf2
+            let mut out = String::with_capacity(TOKEN_LEN * 2 + 3);
+            out.push_str("x'");
+            for b in root_token {
+                out.push_str(&format!("{:02x}", b));
+            }
+            out.push('\'');
+            return out;
+        },
+    }
+}
+
+#[test]
+fn test_db_key_v2_format() {
+    let key = db_key(TokenScheme::V2, &[0u8; 32]);
+    assert_eq!(key.len(), 67);
+    assert!(key.starts_with("x'") && key.ends_with("'"));
+}
+
+#[test]
+fn test_and_token_v2_unambiguous() {
+    assert_ne!(and_token(TokenScheme::V2, &[b"ab", b"c"]), and_token(TokenScheme::V2, &[b"a", b"bc"]));
+    assert_eq!(and_token(TokenScheme::Legacy, &[b"ab", b"c"]), and_token(TokenScheme::Legacy, &[b"a", b"bc"]));
+}

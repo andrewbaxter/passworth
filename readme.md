@@ -48,13 +48,55 @@ Details are available in the config schema. Levels are tiered, so `write` permit
 
 All IPC requests and command line subcommands are named to reflect which permission is required.
 
+A rule applies to the path(s) it lists and everything below them. `lock`/`unlock` requests are checked against the root path (`""`), so a rule that grants `lock` must list the root path to have any effect.
+
+### What the rules can and can't promise
+
+Rules identify the requester by looking at the requesting process and its ancestors in `/proc`: owner uid/gid, the executable path, the first argument, and tags. This is useful for routing and for preventing accidents, but it is important to understand what each clause actually proves.
+
+- `match_user` is a real boundary: a process can't change its uid without privileges.
+
+- `match_binary` is **not** a boundary against other code running as the same user. The check is on the path of the running executable, not on the code that's actually executing. Any process with the same uid can run the trusted binary with `LD_PRELOAD`, ptrace a child of it, or (for the browser native messaging host) simply execute the binary and feed it requests on stdin. Treat `match_binary` as a way to stop unrelated programs from accidentally touching secrets, and as a way to narrow access within an already-trusted uid; do not treat it as isolation between mutually distrusting programs that share a uid. Isolation comes from uids, user namespaces, and which containers can see the IPC socket at all.
+
+  For the same reason, if the browser runs as the same uid as other software you don't fully trust, add a `prompt` to the browser's rule.
+
+- `match_tag` is only as trustworthy as the user that set the tag. Tags are self-asserted: a process calls `passworth-tag` (or sends the `tag` IPC request) and names itself. The canonical use is a higher-privileged user tagging a process tree before dropping privileges, e.g. root running `passworth-tag container-dev -- systemd-nspawn ...`, and rules then matching `tag: container-dev` together with `user: root` and a `walk_ancestors` deep enough to reach the launcher. Anything already running as that user could set the same tag, so a tag never grants more than the uid does; it only distinguishes between trees started by that user. In particular, if containers run without user namespaces, root inside one container can claim another container's tag.
+
+- When a rule has several clauses, each clause is satisfied independently by any process within its own `walk_ancestors` window; they do not have to be satisfied by the same process.
+
+Tags are keyed by the process's pidfd inode, which requires Linux 6.9 or newer; the server refuses to start on older kernels.
+
 # Server setup
 
-Security precautions:
+Security precautions and assumptions:
 
 - Make sure your swap is encrypted! Secrets will be unencrypted in memory when requested and may be written to disk.
 
-- If you use the interactive editing command, make sure your `SECRET_EDITOR` is set up to not make backups, swap files
+- The GTK user interface runs in a separate helper process (see below), so the process holding secrets doesn't parse themes, fonts, input methods or compositor traffic.
+
+- Memory is otherwise not specially protected. The server relies on the kernel zeroing pages before they're reused by another process and on encrypted swap; it does not `mlock` memory (which would pin the whole GTK process) and does not wipe buffers after use. It does mark itself non-dumpable so secrets can't end up in a core dump, and so same-uid processes can't `ptrace` it. If you run it as root, remember root can read its memory regardless.
+
+- Passwords and recovery phrases are stretched with argon2id (64MiB, 3 passes) before use; this memory is only used transiently during unlock.
+
+- If you use the interactive editing command, make sure your `SECURE_EDITOR` is set up to not make backups or swap files. It must be a non-terminal editor (it's run without a console). The secret is edited in a temporary file under `XDG_RUNTIME_DIR`, and the command refuses to run if that isn't set.
+
+- Config files can contain smartcard PINs (`fixed_pin`), so keep them private.
+
+- The IPC framing in released `glove` (up to 0.5.1) reads a peer-supplied length without a cap and may truncate large messages, which lets any local user who can reach the socket make the server allocate arbitrarily. The fix lives on the `fix-read-framed` (main) and `fix-read-framed-0.4` branches of the `glove` repository; until it's released, the workspace `Cargo.toml` expects a checkout of the `fix-read-framed-0.4` branch at `../glove` (sibling of this repository) via `[patch.crates-io]`. Once released, drop the patch entries and bump the dependency.
+
+### Upgrading from the legacy key scheme
+
+Earlier versions used entered passwords directly as keys and relied on sqlcipher's PBKDF2 alone. The current version derives all keys with argon2id and uses a raw sqlcipher key. On the first launch after upgrading the server detects the old scheme, asks you to unlock as before, then asks for any remaining password or recovery phrase factors that weren't used during that unlock (so they can be re-derived without changing them), and re-keys the database. Existing passwords and recovery phrases stay valid; nothing changes from the user's point of view after that.
+
+## Architecture note: the UI helper
+
+`passworth-server` itself has no GTK in it. Whenever it needs to show a window (unlock, credential setup, access prompts) it starts `passworth-ui`, a small GTK helper, and talks to it over stdin/stdout with a tiny JSON protocol (`source/native/src/uiproto.rs`). The helper only ever sees what the user types into it; keys are derived and the database opened in the server. A fresh helper is started for each interaction and killed afterwards.
+
+By default the helper is found next to the server binary and inherits the server's environment (so `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` must be set for the server). If the server runs as root and your session doesn't, set `ui.user` in the config so the helper runs as the session user instead of root talking to your compositor:
+
+```
+"ui": { "user": "me", "env": { "WAYLAND_DISPLAY": "wayland-1" } }
+```
 
 ## Installation
 
@@ -70,9 +112,9 @@ Importing the provided nix `import passworth/source/default.nix { pkgs = pkgs; l
 
 ### Manually
 
-In `source/native` do `cargo build`.
+`source` is a cargo workspace. In `source` do `cargo build` (needs GTK 4 and gtk4-layer-shell for `passworth-ui`; use `-p passworth-native` to skip it).
 
-This will produce binaries `passworth-server` and `passworth` (the CLI). I recommend aliasing the latter to `pw`.
+This will produce binaries `passworth-server`, `passworth-ui` and `passworth` (the CLI). I recommend aliasing the latter to `pw`. `passworth-ui` must be installed next to `passworth-server` or pointed to with `ui.binary` in the config.
 
 ## Configuration
 
@@ -119,19 +161,25 @@ At the moment this has only been built on Firefox. I'm unable to use Chrome and 
 
 The browser plugin is a native plugin - this means there's two components, the extension (a normal extension) and the "native messaging host", a native binary that must be registered with the browser so the extension can communicate with it.
 
+The native messaging host only forwards `meta_keys`, `read` and `derive_otp` requests, so the extension can never write or lock regardless of the rules.
+
 Additionally, you must add the appropriate rules to your config so that the plugin is allowed to read/derive web, like:
 
 ```
 [
   {
     "paths": [ "/web" ],
-    "match_binary": { path": "/path/to/native-messaging-host/binary" },
+    "match_binary": { "path": "/path/to/native-messaging-host/binary" },
     "permit": "read"
   }
 ]
 ```
 
+See "What the rules can and can't promise" above: this rule matches the binary path, so anything running as the same user could run that binary itself. Add `"prompt": { "description": "Browser", "remember_seconds": 300 }` if that matters in your setup.
+
 The full installation instructions are complex and system specific, but on Nixos, `default.nix` (see above) produces `browserModule` which you can add to `imports = [];` to set up the native messaging host. To set up access rules, you can refer to the binary at `${passworth.extensionUnpacked}/native/binary`.
+
+The popup picks a default search path from the site's registrable domain using the public suffix list. The nix build compiles in a pinned copy (`source/nixbuild/publicSuffixList.nix`; override with the `passworth.browser.publicSuffixList` option or the `publicSuffixList` argument to `browser.nix`). For manual `cargo build`s of `source/wasm`, set `PASSWORTH_PSL_PATH` to a downloaded `public_suffix_list.dat`.
 
 In the same directory, `packageExt.nix` will build the extension `.zip` file: `nix-build package_ext.nix -o /mnt/downloads/ext_firefox.zip`
 

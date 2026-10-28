@@ -1,9 +1,9 @@
-{ pkgs, lib, debug ? true }:
+{ pkgs, lib, debug ? true, publicSuffixList ? import ./nixbuild/publicSuffixList.nix { pkgs = pkgs; } }:
 let
   hoj = import ((fetchTarball "https://github.com/andrewbaxter/hammer-of-json/archive/4622456e0eeffd62380dbd88d648c28c8a3359d9.zip") + "/source/package.nix") { pkgs = pkgs; lib = lib; };
   rust = import ./rust.nix { pkgs = pkgs; lib = lib; };
 
-  wasmUnbound = import ./nixbuild/wasm { pkgs = pkgs; lib = lib; debug = debug; };
+  wasmUnbound = import ./nixbuild/wasm { pkgs = pkgs; lib = lib; debug = debug; publicSuffixList = publicSuffixList; };
   nativeId = "me.isandrew.passworth";
   extensionIdKeyChrome = "TODO";
   extensionIdChrome = "TODO";

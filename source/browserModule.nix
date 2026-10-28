@@ -1,11 +1,26 @@
 { config, pkgs, lib, ... }:
 let
-  browser = import ./browser.nix { pkgs = pkgs; lib = lib; debug = true; };
+  browser = import ./browser.nix {
+    pkgs = pkgs;
+    lib = lib;
+    debug = true;
+    publicSuffixList = config.passworth.browser.publicSuffixList;
+  };
 in
 {
   imports = [
     ./nixbuild/native
   ];
+  options.passworth.browser.publicSuffixList = lib.mkOption {
+    type = lib.types.path;
+    default = import ./nixbuild/publicSuffixList.nix { pkgs = pkgs; };
+    defaultText = lib.literalExpression "import ./nixbuild/publicSuffixList.nix { pkgs = pkgs; }";
+    description = ''
+      Copy of the public suffix list compiled into the browser extension popup, used to
+      pick the default search path from the current site's registrable domain. The
+      default is a pinned upstream copy; point this at a newer file to refresh it.
+    '';
+  };
   config = {
     environment.etc = {
       # Locates binary, allows access from extensions

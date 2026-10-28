@@ -1,4 +1,4 @@
-{ debug }:
+{ debug, publicSuffixList ? null }:
 let
   pkgs = import <nixpkgs> { };
   lib = import (<nixpkgs> + "/lib");
@@ -9,7 +9,7 @@ let
     };
     lib = lib;
     debug = debug;
-  };
+  } // (if publicSuffixList == null then { } else { publicSuffixList = publicSuffixList; });
 in
 derivation {
   name = "passworth-firefox.zip";

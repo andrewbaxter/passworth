@@ -1,4 +1,4 @@
-{ pkgs, lib, debug }:
+{ pkgs, lib, debug, publicSuffixList }:
 let
   rust = import ../rust.nix { pkgs = pkgs; lib = lib; };
   workspace = rust.stageWorkspace "passworth-wasm" [
@@ -13,5 +13,6 @@ rust.naersk.buildPackage {
   src = workspace;
   release = false;
   CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+  PASSWORTH_PSL_PATH = publicSuffixList;
 }
 

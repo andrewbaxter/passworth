@@ -44,7 +44,6 @@ use {
         set_root,
     },
     serde::{
-        Deserialize,
         Serialize,
     },
     serde_json::json,
@@ -80,7 +79,13 @@ const CLASS_VBOX: &str = "g_vbox";
 const ICON_CLOCK: &str = "&#xe8b5";
 const ICON_FIELD: &str = "&#xf51d";
 const ICON_PERSON: &str = "&#xe7fd";
-const STORAGE_PSL_KEY: &str = "psl";
+/// The public suffix list (https://publicsuffix.org/list/public_suffix_list.dat),
+/// compiled in so the popup never needs network access. The nix build fetches a
+/// pinned copy; for manual builds set `PASSWORTH_PSL_PATH` to a downloaded copy.
+const PSL_DATA: &str =
+    include_str!(
+        env!("PASSWORTH_PSL_PATH", "Set PASSWORTH_PSL_PATH to the path of a downloaded public_suffix_list.dat")
+    );
 
 fn el_async(work: impl Future<Output = Result<El, String>> + 'static) -> El {
     return el("div").classes(&[CLASS_ASYNC]).own(move |el_| {
@@ -240,43 +245,7 @@ fn main() {
                 let Some(host) = url.host() else {
                     return Ok(el("div"));
                 };
-                let psl;
-                if let Ok(psl0) = LocalStorage::get::<Psl>(STORAGE_PSL_KEY) {
-                    psl = psl0;
-                } else {
-                    let mut psl0 = Psl::new();
-                    for line in reqwest::get("https://publicsuffix.org/list/public_suffix_list.dat")
-                        .await
-                        .map_err(|e| format!("Error fetching public suffix list for domain splitting: {}", e))?
-                        .text()
-                        .await
-                        .map_err(|e| format!("Error reading public suffix list data for domain splitting: {}", e))?
-                        .lines() {
-                        let line = line.trim();
-                        if line.starts_with("//") {
-                            continue;
-                        }
-                        if line.is_empty() {
-                            continue;
-                        }
-                        let mut at = &mut psl0;
-                        let mut rev_segs = line.split(".").collect::<Vec<_>>();
-                        rev_segs.reverse();
-                        let tail = rev_segs.pop().unwrap();
-                        for seg in rev_segs {
-                            if exenum!(at.get_mut(seg), Some(PslEntry::Branch(_)) =>()).is_none() {
-                                at.insert(seg.to_string(), PslEntry::Branch(HashMap::new()));
-                            }
-                            at = exenum!(at.get_mut(seg), Some(PslEntry::Branch(p)) => p).unwrap();
-                        }
-                        at.entry(tail.to_string()).or_insert(PslEntry::Leaf);
-                    }
-                    LocalStorage::set(
-                        STORAGE_PSL_KEY,
-                        &psl0,
-                    ).map_err(|e| format!("Couldn't put public storage list in local storage: {}", e))?;
-                    psl = psl0;
-                }
+                let psl = parse_psl(PSL_DATA);
                 let mut keep = vec![];
                 let mut at_psl = Some(psl);
                 for seg in host.split('.').rev() {
@@ -354,10 +323,34 @@ fn main() {
 
 type Psl = HashMap<String, PslEntry>;
 
-#[derive(Serialize, Deserialize)]
 enum PslEntry {
     Branch(HashMap<String, PslEntry>),
     Leaf,
+}
+
+fn parse_psl(data: &str) -> Psl {
+    let mut psl = Psl::new();
+    for line in data.lines() {
+        let line = line.trim();
+        if line.starts_with("//") {
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let mut at = &mut psl;
+        let mut rev_segs = line.split(".").collect::<Vec<_>>();
+        rev_segs.reverse();
+        let tail = rev_segs.pop().unwrap();
+        for seg in rev_segs {
+            if exenum!(at.get_mut(seg), Some(PslEntry::Branch(_)) =>()).is_none() {
+                at.insert(seg.to_string(), PslEntry::Branch(HashMap::new()));
+            }
+            at = exenum!(at.get_mut(seg), Some(PslEntry::Branch(p)) => p).unwrap();
+        }
+        at.entry(tail.to_string()).or_insert(PslEntry::Leaf);
+    }
+    return psl;
 }
 
 fn save_search_path(state: &Rc<State>) {

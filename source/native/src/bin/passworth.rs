@@ -81,7 +81,7 @@ impl AargvarkFromStr for AargvarkSpecificPath {
             })) else {
                 return vec![];
             };
-            let serde_json::Value::Object(res) = remove_prefix(res, &parent) else {
+            let Ok(serde_json::Value::Object(res)) = remove_prefix(res, &parent) else {
                 return vec![];
             };
             let mut out = vec![];
@@ -158,7 +158,8 @@ enum Command {
     /// Unlock if locked, and replace the data at the following paths. The data is read
     /// from stdin.
     Write(CommandWrite),
-    /// Create or edit a value using the editor you have configured in `SECURE_EDITOR`.
+    /// Create or edit a value using the editor you have configured in `SECURE_EDITOR`
+    /// (must be a non-terminal editor, since it is run detached from the console).
     /// The data is edited as JSON, however invalid JSON will be converted to a string
     /// value. The editor is given a temporary file with the current secret data as its
     /// first argument, and the contents of the file will be stored if it exits with no
@@ -379,7 +380,7 @@ async fn main2() -> Result<(), loga::Error> {
             }).await?;
 
             // Remove prefix on data
-            res = remove_prefix(res, &args.path.0);
+            res = remove_prefix(res, &args.path.0)?;
 
             // Output
             output(serde_json::to_vec_pretty(&res).unwrap())?;
@@ -405,7 +406,7 @@ async fn main2() -> Result<(), loga::Error> {
             }).await?;
 
             // Remove prefix on data
-            res = remove_prefix(res, &args.path.0);
+            res = remove_prefix(res, &args.path.0)?;
 
             // Output
             match (args.json.is_some(), &res) {
@@ -452,13 +453,16 @@ async fn main2() -> Result<(), loga::Error> {
             }).await?;
 
             // Remove prefix on data
-            res = remove_prefix(res, &args.path.0);
+            res = remove_prefix(res, &args.path.0)?;
 
-            // Store in tempfile
-            let run_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-                dir
-            } else {
-                "/run".into()
+            // Store in tempfile. Only the per-user runtime dir is acceptable: it's a
+            // private tmpfs. Anything else risks leaving a readable secret on disk.
+            let Some(run_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+                return Err(
+                    loga::err(
+                        "XDG_RUNTIME_DIR is not set; refusing to write the secret to a shared temporary directory",
+                    ),
+                );
             };
             let t = TempFile::new_in(Path::new(&run_dir)).await.context("Error creating temp file")?;
             t
@@ -476,7 +480,15 @@ async fn main2() -> Result<(), loga::Error> {
             // Edit it
             let mut c = tokio::process::Command::new(editor);
             c.arg(t.file_path());
-            c.output().await.context_with("Error editing secret", ea!(command = c.dbg_str()))?;
+            let status = c.status().await.context_with("Error editing secret", ea!(command = c.dbg_str()))?;
+            if !status.success() {
+                return Err(
+                    loga::err_with(
+                        "Editor exited with an error; not saving",
+                        ea!(command = c.dbg_str(), status = status.dbg_str()),
+                    ),
+                );
+            }
 
             // Save result
             let mut data = vec![];
@@ -616,17 +628,22 @@ fn output(data: impl AsRef<[u8]>) -> Result<(), loga::Error> {
     return Ok(());
 }
 
-fn remove_prefix(value: serde_json::Value, path: &SpecificPath) -> serde_json::Value {
+fn remove_prefix(value: serde_json::Value, path: &SpecificPath) -> Result<serde_json::Value, loga::Error> {
     let mut value = value;
     for seg in &path.0 {
         match value {
-            serde_json::Value::Object(mut o) => value = o.remove(seg).unwrap(),
+            serde_json::Value::Object(mut o) => value = o.remove(seg).unwrap_or(serde_json::Value::Null),
             serde_json::Value::Null => {
                 value = serde_json::Value::Null;
                 break;
             },
-            r => unreachable!("got {:?}", r),
+            r => return Err(
+                loga::err_with(
+                    "Response from server had an unexpected shape at path prefix",
+                    ea!(seg = seg, got = serde_json::to_string(&r).unwrap()),
+                ),
+            ),
         }
     }
-    return value;
+    return Ok(value);
 }

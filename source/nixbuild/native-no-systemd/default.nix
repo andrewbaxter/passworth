@@ -7,13 +7,10 @@
 { config, pkgs, lib, ... }:
 let
   rust = import ../rust.nix { pkgs = pkgs; lib = lib; };
-  workspace = rust.stageWorkspace "passworth-native-no-systemd" [
-    ./Cargo.toml
-    ../../native-no-systemd/Cargo.lock
-    ../../native-no-systemd
-    ../../shared
-    ../../shared-native
-  ];
+  workspace = import ../workspace.nix {
+    pkgs = pkgs;
+    lib = lib;
+  };
 in
 {
   config = {
@@ -21,8 +18,10 @@ in
       (finalPkgs: prevPkgs: {
         # Can't use naersk, closes on remarshal which pulls in the kitchen sink which includes systemd
         passworthNoSystemd = rust.naersk.buildPackage {
-          src = workspace;
+          src = "${workspace}/passworth";
           release = false;
+          cargoBuildOptions = x: x ++ [ "-p" "passworth-native-no-systemd" ];
+          cargoTestOptions = x: x ++ [ "-p" "passworth-native-no-systemd" ];
         };
       })
     ];
