@@ -124,11 +124,11 @@ impl AargvarkFromStr for AargvarkSpecificPath {
 #[vark(break_help)]
 enum Command {
     /// Generate an otp token from a stored `otpauth://` url.
-    DeriveOtp(DeriveOtpCommand),
+    DeriveOtp(CommandDeriveOtp),
     /// Do pgp decryption on data using a stored key.
-    DerivePgpDecrypt(DerivePgpDecryptCommand),
+    DerivePgpDecrypt(CommandDerivePgpDecrypt),
     /// Produce a detached pgp signature on data using a stored key.
-    DerivePgpSign(DerivePgpSignCommand),
+    DerivePgpSign(CommandDerivePgpSign),
     /// Execute a JSON IPC command directly (see ipc jsonschema).
     Json(AargvarkJson<ipc::msg::Req>),
     /// Trigger lock and wait for it to complete.
@@ -136,20 +136,20 @@ enum Command {
     /// Unlock if locked, and retrieve the keys at the following paths (merged into one
     /// JSON tree). The tree is basically the same as in "get" but where all leaf
     /// values are `null`.
-    MetaKeys(MetaKeysCommand),
+    MetaKeys(CommandMetaKeys),
     /// Unlock if locked and retrieve the public key for the ascii-armored pgp key at
     /// the specified path.
-    MetaPgpPubkey(MetaPgpPubkeyCommand),
+    MetaPgpPubkey(CommandMetaPgpPubkey),
     /// Unlock if locked and retrieve the public key for the PEM SSH key at the
     /// specified path.
-    MetaSshPubkey(MetaSshPubkeyCommand),
+    MetaSshPubkey(CommandMetaSshPubkey),
     /// Unlock if locked, and retrieve the data at the following paths (merged into one
     /// JSON tree). Errors if no data found (null output) unless the `--json` flag is
     /// used.
-    Read(ReadCommand),
+    Read(CommandRead),
     /// List revision ids and timestamps for any values under the specified paths
     /// (merged into one JSON tree).
-    ReadRevisions(ListRevisionsCommand),
+    ReadRevisions(CommandListRevisions),
     /// Listen for smartcards (usb and nfc) and show their fingerprints in a format
     /// that can be used for config.
     ScanCards,
@@ -157,43 +157,145 @@ enum Command {
     Unlock,
     /// Unlock if locked, and replace the data at the following paths. The data is read
     /// from stdin.
-    Write(WriteCommand),
+    Write(CommandWrite),
     /// Create or edit a value using the editor you have configured in `SECURE_EDITOR`.
     /// The data is edited as JSON, however invalid JSON will be converted to a string
     /// value. The editor is given a temporary file with the current secret data as its
     /// first argument, and the contents of the file will be stored if it exits with no
     /// error.
-    WriteEdit(WriteEditCommand),
+    WriteEdit(CommandWriteEdit),
     /// Generate a secret and store it at the specified location - for asymmetric keys
     /// returns the public portion.
-    WriteGenerate(WriteGenerateCommand),
+    WriteGenerate(CommandWriteGenerate),
     /// Move data from one location to another.
-    WriteMove(WriteMoveCommand),
+    WriteMove(CommandWriteMove),
     /// Restore data from a previous revision. Note that this preserves history, so you
     /// can restore to before the restore to undo a restore operation.
-    WriteRevert(RevertCommand),
+    WriteRevert(CommandRevert),
 }
 
+//# genemichaels-norm-skip
 #[derive(Aargvark)]
-struct DeriveOtpCommand {
+struct CommandDeriveOtp {
     /// Path of key (in `otpauth://` format) to decrypt with
     key: AargvarkSpecificPath,
 }
 
+//# genemichaels-norm-skip
 #[derive(Aargvark)]
-struct DerivePgpDecryptCommand {
-    /// Data to decrypt.
-    data: AargvarkFile,
+struct CommandDerivePgpDecrypt {
     /// Path of key (in ascii-armor format) to decrypt with
     key: AargvarkSpecificPath,
+    /// Data to decrypt.
+    data: AargvarkFile,
 }
 
+//# genemichaels-norm-skip
 #[derive(Aargvark)]
-struct DerivePgpSignCommand {
-    /// Data to sign.
-    data: AargvarkFile,
+struct CommandDerivePgpSign {
     /// Path of key (in ascii-armor format) to sign with
     key: AargvarkSpecificPath,
+    /// Data to sign.
+    data: AargvarkFile,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandListRevisions {
+    /// Retrieve the revision ids of the data at each path.
+    paths: Vec<AargvarkSpecificPath>,
+    /// Retrieve the revision data at a specific revision.
+    revision: Option<i64>,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandMetaKeys {
+    /// A path to get keys for, in `/path/to/data` format.
+    path: AargvarkSpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandMetaPgpPubkey {
+    /// Path to the private key.
+    path: AargvarkSpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandMetaSshPubkey {
+    /// Path to the private key.
+    path: AargvarkSpecificPath,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandRead {
+    /// A path to get data for, in `/path/to/data` format.
+    path: AargvarkSpecificPath,
+    /// Output json encoded data rather than de-quoting strings. This also allows
+    /// outputting a root null value.
+    json: Option<()>,
+    /// Optionally retrieve the latest data at or before a previous revision id.
+    revision: Option<i64>,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandRevert {
+    /// Revert the data at the specified paths to their value at or before the
+    /// specified revision.
+    paths: Vec<AargvarkSpecificPath>,
+    /// The revision id.
+    #[vark(flag = "--revision")]
+    revision: i64,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandWrite {
+    /// Path to create/overwrite
+    path: AargvarkSpecificPath,
+    /// Input is binary, store as a B64 JSON string
+    binary: Option<()>,
+    /// Input is already JSON so add directly rather than encode as JSON string
+    json: Option<()>,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandWriteEdit {
+    /// Path to create/overwrite
+    path: AargvarkSpecificPath,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandWriteGenerate {
+    /// Where to store the generated data.
+    path: AargvarkSpecificPath,
+    /// What sort of data to generate.
+    variant: GenerateVariant,
+    /// Write the generated data even if data already exists at the path (overwrites
+    /// path).
+    overwrite: Option<()>,
+}
+
+//# genemichaels-norm-skip
+#[derive(Aargvark)]
+struct CommandWriteMove {
+    from: AargvarkSpecificPath,
+    to: AargvarkSpecificPath,
+    /// If force is off and the destination path already has data, this will error.
+    /// Setting force will override the data.
+    overwrite: Option<()>,
 }
 
 #[derive(Aargvark)]
@@ -213,32 +315,28 @@ enum GenerateVariant {
     Ssh,
 }
 
+//# genemichaels-norm-skip
 #[derive(Aargvark)]
 struct GenerateVariantAlphanumeric {
     length: usize,
 }
 
+//# genemichaels-norm-skip
 #[derive(Aargvark)]
 struct GenerateVariantAlphanumericSymbols {
     length: usize,
 }
 
+//# genemichaels-norm-skip
 #[derive(Aargvark)]
 struct GenerateVariantBytes {
     length: usize,
 }
 
+//# genemichaels-norm-skip
 #[derive(Aargvark)]
 struct GenerateVariantSafeAlphanumeric {
     length: usize,
-}
-
-#[derive(Aargvark)]
-struct ListRevisionsCommand {
-    /// Retrieve the revision ids of the data at each path.
-    paths: Vec<AargvarkSpecificPath>,
-    /// Retrieve the revision data at a specific revision.
-    revision: Option<i64>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -492,30 +590,6 @@ async fn main2() -> Result<(), loga::Error> {
     return Ok(());
 }
 
-#[derive(Aargvark)]
-struct MetaKeysCommand {
-    /// A path to get keys for, in `/path/to/data` format.
-    path: AargvarkSpecificPath,
-    /// Optionally retrieve the latest data at or before a previous revision id.
-    revision: Option<i64>,
-}
-
-#[derive(Aargvark)]
-struct MetaPgpPubkeyCommand {
-    /// Path to the private key.
-    path: AargvarkSpecificPath,
-    /// Optionally retrieve the latest data at or before a previous revision id.
-    revision: Option<i64>,
-}
-
-#[derive(Aargvark)]
-struct MetaSshPubkeyCommand {
-    /// Path to the private key.
-    path: AargvarkSpecificPath,
-    /// Optionally retrieve the latest data at or before a previous revision id.
-    revision: Option<i64>,
-}
-
 fn output(data: impl AsRef<[u8]>) -> Result<(), loga::Error> {
     match std::io::stdout().write_all(data.as_ref()) {
         Ok(_) => { },
@@ -542,17 +616,6 @@ fn output(data: impl AsRef<[u8]>) -> Result<(), loga::Error> {
     return Ok(());
 }
 
-#[derive(Aargvark)]
-struct ReadCommand {
-    /// Output json encoded data rather than de-quoting strings. This also allows
-    /// outputting a root null value.
-    json: Option<()>,
-    /// A path to get data for, in `/path/to/data` format.
-    path: AargvarkSpecificPath,
-    /// Optionally retrieve the latest data at or before a previous revision id.
-    revision: Option<i64>,
-}
-
 fn remove_prefix(value: serde_json::Value, path: &SpecificPath) -> serde_json::Value {
     let mut value = value;
     for seg in &path.0 {
@@ -566,50 +629,4 @@ fn remove_prefix(value: serde_json::Value, path: &SpecificPath) -> serde_json::V
         }
     }
     return value;
-}
-
-#[derive(Aargvark)]
-struct RevertCommand {
-    /// Revert the data at the specified paths to their value at or before the
-    /// specified revision.
-    paths: Vec<AargvarkSpecificPath>,
-    /// The revision id.
-    #[vark(flag = "--revision")]
-    revision: i64,
-}
-
-#[derive(Aargvark)]
-struct WriteCommand {
-    /// Input is binary, store as a B64 JSON string
-    binary: Option<()>,
-    /// Input is already JSON so add directly rather than encode as JSON string
-    json: Option<()>,
-    /// Path to create/overwrite
-    path: AargvarkSpecificPath,
-}
-
-#[derive(Aargvark)]
-struct WriteEditCommand {
-    /// Path to create/overwrite
-    path: AargvarkSpecificPath,
-}
-
-#[derive(Aargvark)]
-struct WriteGenerateCommand {
-    /// Write the generated data even if data already exists at the path (overwrites
-    /// path).
-    overwrite: Option<()>,
-    /// Where to store the generated data.
-    path: AargvarkSpecificPath,
-    /// What sort of data to generate.
-    variant: GenerateVariant,
-}
-
-#[derive(Aargvark)]
-struct WriteMoveCommand {
-    from: AargvarkSpecificPath,
-    /// If force is off and the destination path already has data, this will error.
-    /// Setting force will override the data.
-    overwrite: Option<()>,
-    to: AargvarkSpecificPath,
 }

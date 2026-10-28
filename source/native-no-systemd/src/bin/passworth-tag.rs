@@ -13,12 +13,13 @@ use {
 
 const SEP: &str = "--";
 
+//# genemichaels-norm-skip
 #[derive(Aargvark)]
 struct Args {
-    command: Vec<String>,
+    tags: Vec<aargvark::traits_impls::NotFlag>,
     #[allow(dead_code)]
     sep: Sep,
-    tags: Vec<aargvark::traits_impls::NotFlag>,
+    command: Vec<String>,
 }
 
 #[tokio::main(flavor = "current_thread")]
